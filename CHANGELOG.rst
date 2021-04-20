@@ -1,7 +1,14 @@
 Changelog
 =========
 
-- Refactor `parameter_inferency.py`into methodtype-wise individual files  
+- Fix a bug where observable nodes were not colored gray when using `elfi.draw`
+- Add `plot_predicted_node_pairs` in visualization.py.
+
+0.8.0 (2021-03-29)
+------------------
+- Merge adaptive distance ABC-SMC and ABC-SMC functionalities
+- Split `DensityRatioEstimation` from utils.py into separate file
+- Refactor parameter_inferency.py into methodtype-wise individual files  
 - Rename `elfi.methods.mcmc.gelman_rubin` as `elfi.methods.mcmc.gelman_rubin_statistic`
 - Refactor `class ModelPrior` from `methods.utils` to `model.extensions`.
 - Add adaptive threshold selection method for ABC-SMC
