@@ -1,6 +1,6 @@
-"""This module contains BayesianOptimization- and BOLFI-classes."""
+"""This module contains BOLFI."""
 
-__all__ = ['BayesianOptimization', 'BOLFI']
+__all__ = ['BOLFI']
 
 import logging
 
@@ -11,8 +11,7 @@ import elfi.methods.mcmc as mcmc
 import elfi.visualization.interactive as visin
 import elfi.visualization.visualization as vis
 from elfi.loader import get_sub_seed
-from elfi.methods.bo.acquisition import LCBSC
-from elfi.methods.bo.gpy_regression import GPyRegression
+from elfi.methods.bo.bo_wrapper import BoWrapper
 from elfi.methods.bo.utils import stochastic_optimization
 from elfi.methods.inference.parameter_inference import ParameterInference
 from elfi.methods.posteriors import BolfiPosterior
@@ -22,103 +21,70 @@ from elfi.model.extensions import ModelPrior
 
 logger = logging.getLogger(__name__)
 
+class BOLFI(ParameterInference):
+    """Bayesian Optimization for Likelihood-Free Inference (BOLFI).
 
-class BayesianOptimization(ParameterInference):
-    """Bayesian Optimization of an unknown target function."""
+    Approximates the discrepancy function by a stochastic regression model.
+    Discrepancy model is fit by sampling the discrepancy function at points decided by
+    the acquisition function.
+
+    The method implements the framework introduced in Gutmann & Corander, 2016.
+
+    References
+    ----------
+    Gutmann M U, Corander J (2016). Bayesian Optimization for Likelihood-Free Inference
+    of Simulator-Based Statistical Models. JMLR 17(125):1−47, 2016.
+    http://jmlr.org/papers/v17/15-017.html
+
+    """
 
     def __init__(self,
                  model,
                  target_name=None,
+                 active_learner=None,
+                 target_model=None,
                  bounds=None,
                  initial_evidence=None,
                  update_interval=10,
-                 target_model=None,
-                 acquisition_method=None,
-                 acq_noise_var=0,
-                 exploration_rate=10,
                  batch_size=1,
                  batches_per_acquisition=None,
                  async_acq=False,
                  **kwargs):
-        """Initialize Bayesian optimization.
 
-        Parameters
-        ----------
-        model : ElfiModel or NodeReference
-        target_name : str or NodeReference
-            Only needed if model is an ElfiModel
-        bounds : dict, optional
-            The region where to estimate the posterior for each parameter in
-            model.parameters: dict('parameter_name':(lower, upper), ... )`. Not used if
-            custom target_model is given.
-        initial_evidence : int, dict, optional
-            Number of initial evidence or a precomputed batch dict containing parameter
-            and discrepancy values. Default value depends on the dimensionality.
-        update_interval : int, optional
-            How often to update the GP hyperparameters of the target_model
-        target_model : GPyRegression, optional
-        acquisition_method : Acquisition, optional
-            Method of acquiring evidence points. Defaults to LCBSC.
-        acq_noise_var : float or dict, optional
-            Variance(s) of the noise added in the default LCBSC acquisition method.
-            If a dictionary, values should be float specifying the variance for each dimension.
-        exploration_rate : float, optional
-            Exploration rate of the acquisition method
-        batch_size : int, optional
-            Elfi batch size. Defaults to 1.
-        batches_per_acquisition : int, optional
-            How many batches will be requested from the acquisition function at one go.
-            Defaults to max_parallel_batches.
-        async_acq : bool, optional
-            Allow acquisitions to be made asynchronously, i.e. do not wait for all the
-            results from the previous acquisition before making the next. This can be more
-            efficient with a large amount of workers (e.g. in cluster environments) but
-            forgoes the guarantee for the exactly same result with the same initial
-            conditions (e.g. the seed). Default False.
-        **kwargs
-
-        """
         model, target_name = self._resolve_model(model, target_name)
         output_names = [target_name] + model.parameter_names
-        super(BayesianOptimization, self).__init__(
-            model, output_names, batch_size=batch_size, **kwargs)
-
-        target_model = target_model or GPyRegression(
-            self.model.parameter_names, bounds=bounds)
-
+        super(BOLFI, self).__init__(model, output_names, batch_size=batch_size, **kwargs)
+        
         self.target_name = target_name
-        self.target_model = target_model
-
+        self.target_model = None
+        
+        self.active_learner = active_learner
+        if self.active_learner is None:
+            self.active_learner = BoWrapper(self.parameter_names, bounds, target_model)
+        else:
+            # TODO check all infos and raise errors
+            assert(self.parameter_names == self.active_learner.parameter_names)
+        
         n_precomputed = 0
-        n_initial, precomputed = self._resolve_initial_evidence(
-            initial_evidence)
+        n_initial, precomputed = self._resolve_initial_evidence(initial_evidence)
         if precomputed is not None:
-            params = batch_to_arr2d(precomputed, self.target_model.parameter_names)
+            params = batch_to_arr2d(precomputed, self.parameter_names)
             n_precomputed = len(params)
-            self.target_model.update(params, precomputed[target_name])
-
-        self.batches_per_acquisition = batches_per_acquisition or self.max_parallel_batches
-
-        prior = ModelPrior(self.model, parameter_names=self.target_model.parameter_names)
-        self.acquisition_method = acquisition_method or LCBSC(self.target_model,
-                                                              prior=prior,
-                                                              noise_var=acq_noise_var,
-                                                              exploration_rate=exploration_rate,
-                                                              seed=self.seed)
-
+            self.active_learner.update(params, precomputed[target_name], optimize=True)
         self.n_initial_evidence = n_initial
         self.n_precomputed_evidence = n_precomputed
         self.update_interval = update_interval
         self.async_acq = async_acq
+        self.batches_per_acquisition = batches_per_acquisition or self.max_parallel_batches
 
         self.state['n_evidence'] = self.n_precomputed_evidence
-        self.state['last_GP_update'] = self.n_initial_evidence
         self.state['acquisition'] = []
+        self.state['last_GP_update'] = self.n_precomputed_evidence
 
     def _resolve_initial_evidence(self, initial_evidence):
         # Some sensibility limit for starting GP regression
         precomputed = None
-        n_required = max(10, 2**self.target_model.input_dim + 1)
+        n_required = max(10, 2**len(self.parameter_names) + 1)
         n_required = ceil_to_batch_size(n_required, self.batch_size)
 
         if initial_evidence is None:
@@ -177,27 +143,6 @@ class BayesianOptimization(ParameterInference):
         self.objective['n_evidence'] = n_evidence
         self.objective['n_sim'] = n_evidence - self.n_precomputed_evidence
 
-    def extract_result(self):
-        """Extract the result from the current state.
-
-        Returns
-        -------
-        OptimizationResult
-
-        """
-        x_min, _ = stochastic_optimization(
-            self.target_model.predict_mean, self.target_model.bounds, seed=self.seed)
-
-        batch_min = arr2d_to_batch(x_min, self.target_model.parameter_names)
-        outputs = arr2d_to_batch(self.target_model.X, self.target_model.parameter_names)
-
-        # batch_min = arr2d_to_batch(x_min, self.parameter_names)
-        # outputs = arr2d_to_batch(self.target_model.X, self.parameter_names)
-        outputs[self.target_name] = self.target_model.Y
-
-        return OptimizationResult(
-            x_min=batch_min, outputs=outputs, **self._extract_result_kwargs())
-
     def update(self, batch, batch_index):
         """Update the GP regression model of the target node with a new batch.
 
@@ -209,16 +154,16 @@ class BayesianOptimization(ParameterInference):
         batch_index : int
 
         """
-        super(BayesianOptimization, self).update(batch, batch_index)
+        super(BOLFI, self).update(batch, batch_index)
         self.state['n_evidence'] += self.batch_size
 
-        params = batch_to_arr2d(batch, self.target_model.parameter_names)
+        params = batch_to_arr2d(batch, self.parameter_names)
         self._report_batch(batch_index, params, batch[self.target_name])
 
         optimize = self._should_optimize()
-        self.target_model.update(params, batch[self.target_name], optimize)
+        self.active_learner.update(params, batch[self.target_name], optimize)
         if optimize:
-            self.state['last_GP_update'] = self.target_model.n_evidence
+            self.state['last_GP_update'] = self.state['n_evidence']
 
     def prepare_new_batch(self, batch_index):
         """Prepare values for a new batch.
@@ -244,11 +189,11 @@ class BayesianOptimization(ParameterInference):
         # Take the next batch from the acquisition_batch
         acquisition = self.state['acquisition']
         if len(acquisition) == 0:
-            acquisition = self.acquisition_method.acquire(
+            acquisition = self.active_learner.acquire(
                 self.acq_batch_size, t=t)
 
         batch = arr2d_to_batch(
-            acquisition[:self.batch_size], self.target_model.parameter_names)
+            acquisition[:self.batch_size], self.parameter_names)
         self.state['acquisition'] = acquisition[self.batch_size:]
 
         return batch
@@ -267,7 +212,7 @@ class BayesianOptimization(ParameterInference):
         return self.batches.total * self.batch_size
 
     def _allow_submit(self, batch_index):
-        if not super(BayesianOptimization, self)._allow_submit(batch_index):
+        if not super(BOLFI, self)._allow_submit(batch_index):
             return False
 
         if self.async_acq:
@@ -287,9 +232,8 @@ class BayesianOptimization(ParameterInference):
         return True
 
     def _should_optimize(self):
-        current = self.target_model.n_evidence + self.batch_size
         next_update = self.state['last_GP_update'] + self.update_interval
-        return current >= self.n_initial_evidence and current >= next_update
+        return self.state['n_evidence'] >= max(next_update, self.n_initial_evidence)
 
     def _report_batch(self, batch_index, params, distances):
         str = "Received batch {}:\n".format(batch_index)
@@ -298,11 +242,37 @@ class BayesianOptimization(ParameterInference):
             str += "{}{} at {}\n".format(fill, distances[i].item(), params[i])
         logger.debug(str)
 
+    def fit(self, n_evidence, threshold=None, bar=True):
+        """Fit the surrogate model.
+
+        Generates a regression model for the discrepancy given the parameters.
+
+        Currently only Gaussian processes are supported as surrogate models.
+
+        Parameters
+        ----------
+        n_evidence : int, required
+            Number of evidence for fitting
+        threshold : float, optional
+            Discrepancy threshold for creating the posterior (log with log discrepancy).
+        bar : bool, optional
+            Flag to remove (False) the progress bar from output.
+
+        """
+        logger.info("BOLFI: Fitting the surrogate model...")
+        if n_evidence is None:
+            raise ValueError(
+                'You must specify the number of evidence (n_evidence) for the fitting')
+
+        self.infer(n_evidence, bar=bar)
+        return self.extract_posterior(threshold)
+
     def plot_state(self, **options):
-        """Plot the GP surface.
+        """Plot the surrogate model and acquisition function.
 
         This feature is still experimental and currently supports only 2D cases.
         """
+        
         f = plt.gcf()
         if len(f.axes) < 2:
             f, _ = plt.subplots(1, 2, figsize=(
@@ -326,7 +296,7 @@ class BayesianOptimization(ParameterInference):
             if len(gp.X) > 1:
                 f.axes[1].scatter(*point, color='red')
 
-        displays = [gp._gp]
+        displays = [gp.instance]
 
         if options.get('interactive'):
             from IPython import display
@@ -337,9 +307,9 @@ class BayesianOptimization(ParameterInference):
 
         # Update
         visin._update_interactive(displays, options)
-
+    
         def acq(x):
-            return self.acquisition_method.evaluate(x, len(gp.X))
+            return self.active_learner.get_acquisition_value(x, t=len(gp.X))
 
         # Draw the acquisition surface
         visin.draw_contour(
@@ -393,49 +363,27 @@ class BayesianOptimization(ParameterInference):
         """
         return vis.plot_gp(self.target_model, self.target_model.parameter_names, axes,
                            resol, const, bounds, true_params, **kwargs)
+    
+    def extract_result(self):
+        """Extract the result from the current state.
 
-
-class BOLFI(BayesianOptimization):
-    """Bayesian Optimization for Likelihood-Free Inference (BOLFI).
-
-    Approximates the discrepancy function by a stochastic regression model.
-    Discrepancy model is fit by sampling the discrepancy function at points decided by
-    the acquisition function.
-
-    The method implements the framework introduced in Gutmann & Corander, 2016.
-
-    References
-    ----------
-    Gutmann M U, Corander J (2016). Bayesian Optimization for Likelihood-Free Inference
-    of Simulator-Based Statistical Models. JMLR 17(125):1−47, 2016.
-    http://jmlr.org/papers/v17/15-017.html
-
-    """
-
-    def fit(self, n_evidence, threshold=None, bar=True):
-        """Fit the surrogate model.
-
-        Generates a regression model for the discrepancy given the parameters.
-
-        Currently only Gaussian processes are supported as surrogate models.
-
-        Parameters
-        ----------
-        n_evidence : int, required
-            Number of evidence for fitting
-        threshold : float, optional
-            Discrepancy threshold for creating the posterior (log with log discrepancy).
-        bar : bool, optional
-            Flag to remove (False) the progress bar from output.
+        Returns
+        -------
+        OptimizationResult
 
         """
-        logger.info("BOLFI: Fitting the surrogate model...")
-        if n_evidence is None:
-            raise ValueError(
-                'You must specify the number of evidence (n_evidence) for the fitting')
+        self.target_model = self.active_learner.get_model()
+        
+        x_min, _ = stochastic_optimization(
+            self.target_model.predict_mean, self.target_model.bounds, seed=self.seed)
 
-        self.infer(n_evidence, bar=bar)
-        return self.extract_posterior(threshold)
+        batch_min = arr2d_to_batch(x_min, self.target_model.parameter_names)
+        outputs = arr2d_to_batch(self.target_model.X, self.target_model.parameter_names)
+        outputs[self.target_name] = self.target_model.Y
+
+        return OptimizationResult(
+            x_min=batch_min, outputs=outputs, **self._extract_result_kwargs())
+
 
     def extract_posterior(self, threshold=None):
         """Return an object representing the approximate posterior.
@@ -456,6 +404,7 @@ class BOLFI(BayesianOptimization):
             raise ValueError(
                 'Model is not fitted yet, please see the `fit` method.')
 
+        self.target_model = self.active_learner.get_model()
         prior = ModelPrior(self.model, parameter_names=self.target_model.parameter_names)
         return BolfiPosterior(self.target_model, threshold=threshold, prior=prior)
 
