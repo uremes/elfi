@@ -23,6 +23,8 @@ class BoTorchWrapper():
                  acq_method=None,
                  acq_params=None,
                  optim_params=None,
+                 scale = 1,
+                 seed = None
                  ):
 
         self.parameter_names = parameter_names
@@ -31,8 +33,12 @@ class BoTorchWrapper():
         self.likelihood = likelihood
         self.covar_module = covar_module
         self.acq_method = acq_method or LCBSC
-        self.acq_params = acq_params or {'exploration_rate': 10}
+        self.acq_params = acq_params or {'t': None, 'exploration_rate': 10}
         self.optim_params = optim_params or {'num_restarts': 5, 'raw_samples': 20}
+        self.scale = scale
+        if seed:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
 
         # TODO add device
 
@@ -42,6 +48,8 @@ class BoTorchWrapper():
         self.model = None
 
     def update(self, x, y, optimize=True):
+
+        y = self.scale * y
 
         if self.model is not None:
             x = torch.tensor(x, dtype=torch.double).reshape(-1, self.input_dim)
@@ -68,7 +76,7 @@ class BoTorchWrapper():
             raise ValueError('Selected acquisition method does not work with batch size > 1.')
 
         # update acquisition index
-        self.acq_params['t'] = t
+        if 't' in self.acq_params: self.acq_params['t'] = t
 
         acq_function = self.acq_method(self.model, **self.acq_params)
         x, value = optimize_acqf(acq_function, bounds=self.bounds, q=n, **self.optim_params)
@@ -78,8 +86,10 @@ class BoTorchWrapper():
     def get_model(self):
 
         if self.model is not None:
+            model = copy.deepcopy(self.model)
+            scale = 1 / self.scale
             bounds = list(np.transpose(self.bounds.numpy()))
-            return RegressionModel(copy.deepcopy(self.model), self.parameter_names, bounds)
+            return GPyTorchRegression(model, self.parameter_names, bounds, scale=scale)
         else:
             return None
 
@@ -88,22 +98,29 @@ class BoTorchWrapper():
         x = torch.tensor(x, dtype=torch.double).reshape(-1, 1, self.input_dim)
 
         # update acquisition index
-        self.acq_params['t'] = t
+        if 't' in self.acq_params: self.acq_params['t'] = t
 
         acq_function = self.acq_method(self.model, **self.acq_params)
         return acq_function(x).detach().numpy()
 
-    def get_model_pred(self, x):
+    def get_model_pred(self, x, fast_pred_var=True):
 
         x = torch.tensor(x, dtype=torch.double).reshape(-1, self.input_dim)
 
         # activate evaluation mode
         self.model.eval()
+        self.model.likelihood.eval()
 
-        with torch.no_grad(), gpytorch.settings.fast_pred_var():
-            pred = self.model(x)
+        # resolve computation context
+        if fast_pred_var:
+            computation_context = gpytorch.settings.fast_pred_var()
+        else:
+            computation_context = contextlib.nullcontext()
 
-        return pred.mean.numpy()
+        with torch.no_grad(), computation_context:
+            pred = self.model.likelihood(self.model(x))
+
+        return pred.mean.numpy().reshape(-1, 1), pred.variance.detach().numpy().reshape(-1, 1)
 
     def get_evidence(self):
 
@@ -120,7 +137,7 @@ class BoTorchWrapper():
         return torch.tensor(np.transpose(bounds), dtype=torch.double)
 
     def _init_model(self, x, y, state_dict=None):
-        
+
         self.model = SingleTaskGP(x, y, likelihood=self.likelihood, covar_module=self.covar_module)
         if state_dict is not None:
             self.model.load_state_dict(state_dict)
@@ -134,27 +151,48 @@ class BoTorchWrapper():
 class LCBSC(UpperConfidenceBound):
     """
     Lower confidence bound selection criterion as implemented in ELFI.
+
+    The acquisition score is calculated as `LCBSC(x) = mu(x) - sqrt(beta) * s(x)`,
+    where `mu` and `s` are the posterior mean and standard deviation, and beta is
+    calculated based on an exploration rate parameter and the current acquisition
+    index.
+
+    Does not support batch acquisitions.
+
     """
+    def __init__(self, model, exploration_rate, t):
+        """
+        Initalize acquisition function.
 
-    def __init__(self, model, exploration_rate, t, **kwargs):
+        Parameters
+        ----------
+        model : botorch.models.model.Model
+            A fitted single-outcome GP model.
+        exploration_rate : float
+            Exploration rate used to calculate beta. Must be positive, exploration_rate > 0.
+        t : int
+            Acquisition index.
+        maximize: bool, optional
 
+        """
         beta = self._beta(1/exploration_rate, model.train_inputs[0].shape[1], t)
         super().__init__(model, beta=beta, maximize=False)
         
     def _beta(self, delta, d, t):
-        # Start from 0
+        """Calculate beta based on the update rule used in ELFI."""
         t += 1
         return 2 * np.log(t**(2 * d + 2) * np.pi**2 / (3 * delta))
 
 
-class RegressionModel():
+class GPyTorchRegression():
 
-    def __init__(self, model, parameter_names, bounds, fast_pred_var=True):
+    def __init__(self, model, parameter_names, bounds, scale=1, fast_pred_var=True):
 
         self.model = model
         self.parameter_names = parameter_names
         self.bounds = bounds
         self.input_dim = len(bounds)
+        self.scale = scale
         if fast_pred_var:
             self.computation_context = gpytorch.settings.fast_pred_var()
         else:
@@ -171,7 +209,9 @@ class RegressionModel():
             pred = self.model(x)
             if not noiseless: pred = self.model.likelihood(pred)
 
-        return pred.mean.numpy().reshape(-1, 1), pred.variance.detach().numpy().reshape(-1, 1)
+        m = self.scale * pred.mean.numpy().reshape(-1, 1)
+        v = pred.variance.detach().numpy().reshape(-1, 1)
+        return m, v
     
     def predict_mean(self, x):
         
@@ -189,8 +229,10 @@ class RegressionModel():
         with self.computation_context:
             dmdx  = torch.autograd.functional.jacobian(m, x)
             dvdx  = torch.autograd.functional.jacobian(v, x)
-        
-        return dmdx.numpy().reshape(-1, self.input_dim), dvdx.numpy().reshape(-1, self.input_dim)
+
+        dmdx = self.scale * dmdx.numpy().reshape(-1, self.input_dim)
+        dvdx = dvdx.numpy().reshape(-1, self.input_dim)
+        return dmdx, dvdx
      
     def predictive_gradient_mean(self, x):
             
@@ -203,12 +245,15 @@ class RegressionModel():
         with self.computation_context:
             dmdx  = torch.autograd.functional.jacobian(m, x)
 
-        return dmdx.numpy().reshape(-1, self.input_dim)
+        return self.scale * dmdx.numpy().reshape(-1, self.input_dim)
 
     def _resolve_bounds(self, bounds, parameter_names):
-        # TODO check that all param names are in bounds and raise informative errors
-        # convert dict to list
+
         if isinstance(bounds, dict):
+            for param in parameter_names:
+                if param not in bounds:
+                    raise ValueError(f'Parameter \'{param}\' not found in bounds.')
+            # convert to list
             return [bounds[param] for param in parameter_names]
         else:
             return bounds
@@ -221,7 +266,7 @@ class RegressionModel():
     @property
     def Y(self):
         """Return output evidence."""
-        return self.model.train_targets.numpy().reshape(-1,1)
+        return self.scale * self.model.train_targets.numpy().reshape(-1,1)
 
     @property
     def instance(self):

@@ -62,13 +62,15 @@ class BOLFI(ParameterInference):
         if self.active_learner is None:
             self.active_learner = BoWrapper(self.parameter_names, bounds, target_model)
         else:
-            # TODO check all infos and raise errors
-            assert(self.parameter_names == self.active_learner.parameter_names)
+            for param in self.active_learner.parameter_names:
+                if param not in self.parameter_names:
+                    raise ValueError(f'Parameter \'{param}\' expected in active learner but not '
+                    'found in model parameters.')
         
         n_precomputed = 0
         n_initial, precomputed = self._resolve_initial_evidence(initial_evidence)
         if precomputed is not None:
-            params = batch_to_arr2d(precomputed, self.parameter_names)
+            params = batch_to_arr2d(precomputed, self.active_learner.parameter_names)
             n_precomputed = len(params)
             self.active_learner.update(params, precomputed[target_name], optimize=True)
         self.n_initial_evidence = n_initial
@@ -84,7 +86,7 @@ class BOLFI(ParameterInference):
     def _resolve_initial_evidence(self, initial_evidence):
         # Some sensibility limit for starting GP regression
         precomputed = None
-        n_required = max(10, 2**len(self.parameter_names) + 1)
+        n_required = max(10, 2**len(self.active_learner.parameter_names) + 1)
         n_required = ceil_to_batch_size(n_required, self.batch_size)
 
         if initial_evidence is None:
@@ -157,7 +159,7 @@ class BOLFI(ParameterInference):
         super(BOLFI, self).update(batch, batch_index)
         self.state['n_evidence'] += self.batch_size
 
-        params = batch_to_arr2d(batch, self.parameter_names)
+        params = batch_to_arr2d(batch, self.active_learner.parameter_names)
         self._report_batch(batch_index, params, batch[self.target_name])
 
         optimize = self._should_optimize()
@@ -193,7 +195,7 @@ class BOLFI(ParameterInference):
                 self.acq_batch_size, t=t)
 
         batch = arr2d_to_batch(
-            acquisition[:self.batch_size], self.parameter_names)
+            acquisition[:self.batch_size], self.active_learner.parameter_names)
         self.state['acquisition'] = acquisition[self.batch_size:]
 
         return batch

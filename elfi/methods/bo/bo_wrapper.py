@@ -88,7 +88,7 @@ class BoWrapper():
 
     def get_model_pred(self, x):
 
-        return self.target_model.predict_mean(x)
+        return self.target_model.predict(x)
 
     def get_evidence(self):
 
