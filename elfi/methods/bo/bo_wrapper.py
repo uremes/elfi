@@ -86,9 +86,9 @@ class BoWrapper():
 
         return self.acquisition_method.evaluate(x, t=t)
 
-    def get_model_pred(self, x):
+    def get_model_pred(self, x, observation_noise=True):
 
-        return self.target_model.predict(x)
+        return self.target_model.predict(x, noiseless=not(observation_noise))
 
     def get_evidence(self):
 

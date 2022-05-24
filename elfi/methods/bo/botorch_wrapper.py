@@ -8,8 +8,10 @@ import numpy as np
 import torch
 import gpytorch
 from botorch.models import SingleTaskGP
-from botorch.acquisition import AnalyticAcquisitionFunction, UpperConfidenceBound
+from botorch.models.transforms.input import Normalize
+from botorch.models.transforms.outcome import Standardize
 from botorch.fit import fit_gpytorch_model
+from botorch.acquisition import AnalyticAcquisitionFunction, UpperConfidenceBound
 from botorch.optim import optimize_acqf
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
@@ -18,10 +20,12 @@ class BoTorchWrapper():
     def __init__(self,
                  parameter_names,
                  bounds,
-                 likelihood=None,
-                 covar_module=None,
-                 acq_method=None,
-                 acq_params=None,
+                 model_class=None,
+                 model_options=None,
+                 mll_class=None,
+                 mll_options=None,
+                 acq_class=None,
+                 acq_options=None,
                  optim_params=None,
                  scale = 1,
                  seed = None
@@ -30,10 +34,12 @@ class BoTorchWrapper():
         self.parameter_names = parameter_names
         self.input_dim = len(self.parameter_names)
         self.bounds = self._resolve_bounds(bounds, self.parameter_names)
-        self.likelihood = likelihood
-        self.covar_module = covar_module
-        self.acq_method = acq_method or LCBSC
-        self.acq_params = acq_params or {'t': None, 'exploration_rate': 10}
+        self.model_class = model_class or SingleTaskGP
+        self.model_options = model_options or self._get_default_options(self.bounds)
+        self.mll_class = mll_class or ExactMarginalLogLikelihood
+        self.mll_options = mll_options or {}
+        self.acq_class = acq_class or LCBSC
+        self.acq_options = acq_options or {'t': None, 'exploration_rate': 10}
         self.optim_params = optim_params or {'num_restarts': 5, 'raw_samples': 20}
         self.scale = scale
         if seed:
@@ -72,13 +78,13 @@ class BoTorchWrapper():
 
     def acquire(self, n, t=None):
 
-        if n > 1 and issubclass(self.acq_method, AnalyticAcquisitionFunction):
-            raise ValueError('Selected acquisition method does not work with batch size > 1.')
+        if n > 1 and issubclass(self.acq_class, AnalyticAcquisitionFunction):
+            raise ValueError('Selected acquisition class does not work with batch size > 1.')
 
         # update acquisition index
-        if 't' in self.acq_params: self.acq_params['t'] = t
+        if 't' in self.acq_options: self.acq_options['t'] = t
 
-        acq_function = self.acq_method(self.model, **self.acq_params)
+        acq_function = self.acq_class(self.model, **self.acq_options)
         x, value = optimize_acqf(acq_function, bounds=self.bounds, q=n, **self.optim_params)
 
         return x.numpy()
@@ -98,12 +104,12 @@ class BoTorchWrapper():
         x = torch.tensor(x, dtype=torch.double).reshape(-1, 1, self.input_dim)
 
         # update acquisition index
-        if 't' in self.acq_params: self.acq_params['t'] = t
+        if 't' in self.acq_options: self.acq_options['t'] = t
 
-        acq_function = self.acq_method(self.model, **self.acq_params)
+        acq_function = self.acq_class(self.model, **self.acq_options)
         return acq_function(x).detach().numpy()
 
-    def get_model_pred(self, x, fast_pred_var=True):
+    def get_model_pred(self, x, observation_noise=True, fast_pred_var=True):
 
         x = torch.tensor(x, dtype=torch.double).reshape(-1, self.input_dim)
 
@@ -118,7 +124,7 @@ class BoTorchWrapper():
             computation_context = contextlib.nullcontext()
 
         with torch.no_grad(), computation_context:
-            pred = self.model.likelihood(self.model(x))
+            pred = self.model.posterior(x, observation_noise=observation_noise)
 
         return pred.mean.numpy().reshape(-1, 1), pred.variance.detach().numpy().reshape(-1, 1)
 
@@ -128,23 +134,38 @@ class BoTorchWrapper():
 
     def _resolve_bounds(self, bounds, parameter_names):
 
-        # check that all parameters have bounds
-        for param in parameter_names:
-            if param not in bounds:
-                raise ValueError(f'Parameter \'{param}\' not found in bounds.')
-        # convert bounds to botorch format
-        bounds = [bounds[param] for param in parameter_names]
-        return torch.tensor(np.transpose(bounds), dtype=torch.double)
+        if isinstance(bounds, dict):
+            # check that all parameters have bounds
+            for param in parameter_names:
+                if param not in bounds:
+                    raise ValueError(f'Parameter \'{param}\' not found in bounds.')
+            # convert bounds to botorch format
+            bounds = [bounds[param] for param in parameter_names]
+            return torch.tensor(np.transpose(bounds), dtype=torch.double)
+        else:
+            return bounds
+
+    def _get_default_options(self, bounds):
+
+        options = {}
+
+        # use the active learner bounds to normalise inputs
+        if not(all(bounds[0] == 0) and all(bounds[1] == 1)):
+            options['input_transform'] =  Normalize(bounds.shape[1], bounds=bounds)
+
+        # standardise outcome mean and variance
+        options['outcome_transform'] = Standardize(1)
+
+        return options
 
     def _init_model(self, x, y, state_dict=None):
 
-        self.model = SingleTaskGP(x, y, likelihood=self.likelihood, covar_module=self.covar_module)
-        if state_dict is not None:
-            self.model.load_state_dict(state_dict)
+        self.model = self.model_class(x, y, **self.model_options)
+        if state_dict is not None: self.model.load_state_dict(state_dict)
 
     def _optimize(self):
 
-        mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
+        mll = self.mll_class(self.model.likelihood, self.model, **self.mll_options)
         fit_gpytorch_model(mll)
 
 
@@ -190,8 +211,8 @@ class GPyTorchRegression():
 
         self.model = model
         self.parameter_names = parameter_names
-        self.bounds = bounds
-        self.input_dim = len(bounds)
+        self.input_dim = len(self.parameter_names)
+        self.bounds = self._resolve_bounds(bounds, self.parameter_names)
         self.scale = scale
         if fast_pred_var:
             self.computation_context = gpytorch.settings.fast_pred_var()
@@ -206,10 +227,9 @@ class GPyTorchRegression():
         x = torch.tensor(x, dtype=torch.double).reshape(-1, self.input_dim)
 
         with torch.no_grad(), self.computation_context:
-            pred = self.model(x)
-            if not noiseless: pred = self.model.likelihood(pred)
+            pred = self.model.posterior(x, observation_noise=not(noiseless))
 
-        m = self.scale * pred.mean.numpy().reshape(-1, 1)
+        m = self.scale * pred.mean.detach().numpy().reshape(-1, 1)
         v = pred.variance.detach().numpy().reshape(-1, 1)
         return m, v
     
@@ -223,8 +243,8 @@ class GPyTorchRegression():
         x.requires_grad = True
         
         # define the mean and variance function that we want to differentiate
-        m = lambda x: self.model(x).mean.sum()
-        v = lambda x: self.model(x).variance.sum()
+        m = lambda x: self.model.posterior(x).mean.sum()
+        v = lambda x: self.model.posterior(x).variance.sum()
         
         with self.computation_context:
             dmdx  = torch.autograd.functional.jacobian(m, x)
@@ -240,7 +260,7 @@ class GPyTorchRegression():
         x.requires_grad = True
         
         # define the function we want to differentiate
-        m = lambda x: self.model(x).mean.sum()
+        m = lambda x: self.model.posterior(x).mean.sum()
         
         with self.computation_context:
             dmdx  = torch.autograd.functional.jacobian(m, x)
@@ -261,12 +281,19 @@ class GPyTorchRegression():
     @property
     def X(self):
         """Return input evidence."""
-        return self.model.train_inputs[0].numpy()
+        if self.model._has_transformed_inputs:
+            return self.model._original_train_inputs.numpy()
+        else:
+            return self.model.train_inputs[0].numpy()
 
     @property
     def Y(self):
         """Return output evidence."""
-        return self.scale * self.model.train_targets.numpy().reshape(-1,1)
+        if hasattr(self.model, 'outcome_transform'):
+            y = self.model.outcome_transform.untransform(self.model.train_targets)[0]
+        else:
+            y = self.model.train_targets
+        return self.scale * y.numpy().reshape(-1,1)
 
     @property
     def instance(self):
