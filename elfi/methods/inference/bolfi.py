@@ -4,12 +4,9 @@ __all__ = ['BOLFI']
 
 import logging
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 import elfi.methods.mcmc as mcmc
-import elfi.visualization.interactive as visin
-import elfi.visualization.visualization as vis
 from elfi.loader import get_sub_seed
 from elfi.methods.bo.bo_wrapper import BoWrapper
 from elfi.methods.bo.utils import stochastic_optimization
@@ -20,6 +17,7 @@ from elfi.methods.utils import arr2d_to_batch, batch_to_arr2d, ceil_to_batch_siz
 from elfi.model.extensions import ModelPrior
 
 logger = logging.getLogger(__name__)
+
 
 class BOLFI(ParameterInference):
     """Bayesian Optimization for Likelihood-Free Inference (BOLFI).
@@ -69,12 +67,12 @@ class BOLFI(ParameterInference):
             and discrepancy values. Default value depends on the dimensionality.
         update_interval : int, optional
             How often to update the GP hyperparameters in active_learner
-        active_learner: ActiveLearnerBase, optional
+        active_learner: ActiveLearner, optional
             Wrapper for surrogate model update and acquisition activities. Defaults to
             BoWrapper.
         target_model : GPyRegression, optional
             Not used if custom active_learner is given.
-        acquisition_method : Acquisition, optional
+        acquisition_method : AcquisitionBase, optional
             Method of acquiring evidence points. Defaults to LCBSC. Not used if custom
             active_learner is given.
         acq_noise_var : float or dict, optional
@@ -96,15 +94,15 @@ class BOLFI(ParameterInference):
             forgoes the guarantee for the exactly same result with the same initial
             conditions (e.g. the seed). Default False.
         **kwargs
-        """
 
+        """
         model, target_name = self._resolve_model(model, target_name)
         output_names = [target_name] + model.parameter_names
         super(BOLFI, self).__init__(model, output_names, batch_size=batch_size, **kwargs)
-        
+
         self.target_name = target_name
         self.target_model = None
-        
+
         self.active_learner = active_learner
         if self.active_learner is None:
             self.active_learner = BoWrapper(self.parameter_names,
@@ -118,8 +116,8 @@ class BOLFI(ParameterInference):
             for param in self.active_learner.parameter_names:
                 if param not in self.parameter_names:
                     raise ValueError(f'Parameter \'{param}\' expected in active learner but not '
-                    'found in model parameters.')
-        
+                                     'found in model parameters.')
+
         n_precomputed = 0
         n_initial, precomputed = self._resolve_initial_evidence(initial_evidence)
         if precomputed is not None:
@@ -327,58 +325,9 @@ class BOLFI(ParameterInference):
         """Plot the surrogate model and acquisition function.
 
         This feature is still experimental and currently supports only 2D cases.
+
         """
-        
-        f = plt.gcf()
-        if len(f.axes) < 2:
-            f, _ = plt.subplots(1, 2, figsize=(
-                13, 6), sharex='row', sharey='row')
-
-        gp = self.target_model
-
-        # Draw the GP surface
-        visin.draw_contour(
-            gp.predict_mean,
-            gp.bounds,
-            self.target_model.parameter_names,
-            title='GP target surface',
-            points=gp.X,
-            axes=f.axes[0],
-            **options)
-
-        # Draw the latest acquisitions
-        if options.get('interactive'):
-            point = gp.X[-1, :]
-            if len(gp.X) > 1:
-                f.axes[1].scatter(*point, color='red')
-
-        displays = [gp.instance]
-
-        if options.get('interactive'):
-            from IPython import display
-            displays.insert(
-                0,
-                display.HTML('<span><b>Iteration {}:</b> Acquired {} at {}</span>'.format(
-                    len(gp.Y), gp.Y[-1][0], point)))
-
-        # Update
-        visin._update_interactive(displays, options)
-    
-        def acq(x):
-            return self.active_learner.get_acquisition_value(x, t=len(gp.X))
-
-        # Draw the acquisition surface
-        visin.draw_contour(
-            acq,
-            gp.bounds,
-            self.target_model.parameter_names,
-            title='Acquisition surface',
-            points=None,
-            axes=f.axes[1],
-            **options)
-
-        if options.get('close'):
-            plt.close()
+        self.active_learner.plot_state()
 
     def plot_discrepancy(self, axes=None, **kwargs):
         """Plot acquired parameters vs. resulting discrepancy.
@@ -392,10 +341,7 @@ class BOLFI(ParameterInference):
         axes : np.array of plt.Axes
 
         """
-        return vis.plot_discrepancy(self.target_model,
-                                    self.target_model.parameter_names,
-                                    axes=axes,
-                                    **kwargs)
+        return self.target_model.plot_discrepancy(axes=axes, **kwargs)
 
     def plot_gp(self, axes=None, resol=50, const=None, bounds=None, true_params=None, **kwargs):
         """Plot pairwise relationships as a matrix with parameters vs. discrepancy.
@@ -417,9 +363,9 @@ class BOLFI(ParameterInference):
         axes : np.array of plt.Axes
 
         """
-        return vis.plot_gp(self.target_model, self.target_model.parameter_names, axes,
-                           resol, const, bounds, true_params, **kwargs)
-    
+        return self.target_model.plot(axes=axes, resol=resol, const=const, bounds=bounds,
+                                      true_params=true_params, **kwargs)
+
     def extract_result(self):
         """Extract the result from the current state.
 
@@ -429,7 +375,7 @@ class BOLFI(ParameterInference):
 
         """
         self.target_model = self.active_learner.get_model()
-        
+
         x_min, _ = stochastic_optimization(
             self.target_model.predict_mean, self.target_model.bounds, seed=self.seed)
 
@@ -439,7 +385,6 @@ class BOLFI(ParameterInference):
 
         return OptimizationResult(
             x_min=batch_min, outputs=outputs, **self._extract_result_kwargs())
-
 
     def extract_posterior(self, threshold=None):
         """Return an object representing the approximate posterior.

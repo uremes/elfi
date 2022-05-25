@@ -8,11 +8,13 @@ import logging
 import GPy
 import numpy as np
 
+from elfi.methods.bo.active_learner import PredictiveDistributionModel
+
 logger = logging.getLogger(__name__)
 logging.getLogger("GP").setLevel(logging.WARNING)  # GPy library logger
 
 
-class GPyRegression:
+class GPyRegression(PredictiveDistributionModel):
     """Gaussian Process regression using the GPy library.
 
     GPy API: https://sheffieldml.github.io/GPy/
