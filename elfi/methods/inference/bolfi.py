@@ -41,15 +41,62 @@ class BOLFI(ParameterInference):
     def __init__(self,
                  model,
                  target_name=None,
-                 active_learner=None,
-                 target_model=None,
                  bounds=None,
                  initial_evidence=None,
                  update_interval=10,
+                 active_learner=None,
+                 target_model=None,
+                 acquisition_method=None,
+                 acq_noise_var=0,
+                 exploration_rate=10,
                  batch_size=1,
                  batches_per_acquisition=None,
                  async_acq=False,
                  **kwargs):
+        """Initialize BOLFI.
+
+        Parameters
+        ----------
+        model : ElfiModel or NodeReference
+        target_name : str or NodeReference
+            Only needed if model is an ElfiModel
+        bounds : dict, optional
+            The region where to estimate the posterior for each parameter in
+            model.parameters: dict('parameter_name':(lower, upper), ... )`. Not used if
+            custom active_learner or target_model is given.
+        initial_evidence : int, dict, optional
+            Number of initial evidence or a precomputed batch dict containing parameter
+            and discrepancy values. Default value depends on the dimensionality.
+        update_interval : int, optional
+            How often to update the GP hyperparameters in active_learner
+        active_learner: ActiveLearnerBase, optional
+            Wrapper for surrogate model update and acquisition activities. Defaults to
+            BoWrapper.
+        target_model : GPyRegression, optional
+            Not used if custom active_learner is given.
+        acquisition_method : Acquisition, optional
+            Method of acquiring evidence points. Defaults to LCBSC. Not used if custom
+            active_learner is given.
+        acq_noise_var : float or dict, optional
+            Variance(s) of the noise added in the default LCBSC acquisition method.
+            If a dictionary, values should be float specifying the variance for each dimension.
+            Not used if custom active_learner is given.
+        exploration_rate : float, optional
+            Exploration rate of the acquisition method. Not used if custom active_learner
+            is given.
+        batch_size : int, optional
+            Elfi batch size. Defaults to 1.
+        batches_per_acquisition : int, optional
+            How many batches will be requested from the acquisition function at one go.
+            Defaults to max_parallel_batches.
+        async_acq : bool, optional
+            Allow acquisitions to be made asynchronously, i.e. do not wait for all the
+            results from the previous acquisition before making the next. This can be more
+            efficient with a large amount of workers (e.g. in cluster environments) but
+            forgoes the guarantee for the exactly same result with the same initial
+            conditions (e.g. the seed). Default False.
+        **kwargs
+        """
 
         model, target_name = self._resolve_model(model, target_name)
         output_names = [target_name] + model.parameter_names
@@ -60,7 +107,13 @@ class BOLFI(ParameterInference):
         
         self.active_learner = active_learner
         if self.active_learner is None:
-            self.active_learner = BoWrapper(self.parameter_names, bounds, target_model)
+            self.active_learner = BoWrapper(self.parameter_names,
+                                            bounds=bounds,
+                                            target_model=target_model,
+                                            acquisition_method=acquisition_method,
+                                            acq_noise_var=acq_noise_var,
+                                            exploration_rate=exploration_rate,
+                                            seed=self.seed)
         else:
             for param in self.active_learner.parameter_names:
                 if param not in self.parameter_names:
@@ -73,6 +126,7 @@ class BOLFI(ParameterInference):
             params = batch_to_arr2d(precomputed, self.active_learner.parameter_names)
             n_precomputed = len(params)
             self.active_learner.update(params, precomputed[target_name], optimize=True)
+            self.target_model = self.active_learner.get_model()
         self.n_initial_evidence = n_initial
         self.n_precomputed_evidence = n_precomputed
         self.update_interval = update_interval

@@ -7,7 +7,7 @@ from elfi.methods.bo.gpy_regression import GPyRegression
 
 
 @pytest.mark.usefixtures('with_all_clients')
-def test_BO(ma2):
+def test_BOLFI(ma2):
     # Log transform of the distance usually smooths the distance surface
     log_d = elfi.Operation(np.log, ma2['d'], name='log_d')
 
@@ -15,57 +15,57 @@ def test_BO(ma2):
     res_init = elfi.Rejection(log_d, batch_size=5).sample(n_init, quantile=1)
 
     bounds = {n: (-2, 2) for n in ma2.parameter_names}
-    bo = elfi.BayesianOptimization(
+    bolfi = elfi.BOLFI(
         log_d, initial_evidence=res_init.outputs, update_interval=10, batch_size=5, bounds=bounds)
-    assert bo.target_model.n_evidence == n_init
-    assert bo.n_evidence == n_init
-    assert bo.n_precomputed_evidence == n_init
-    assert bo.n_initial_evidence == n_init
+
+    assert bolfi.target_model.n_evidence == n_init
+    assert bolfi.n_evidence == n_init
+    assert bolfi.n_precomputed_evidence == n_init
+    assert bolfi.n_initial_evidence == n_init
 
     n1 = 5
-    bo.infer(n_init + n1)
+    bolfi.infer(n_init + n1)
 
-    assert bo.target_model.n_evidence == n_init + n1
-    assert bo.n_evidence == n_init + n1
-    assert bo.n_precomputed_evidence == n_init
-    assert bo.n_initial_evidence == n_init
+    assert bolfi.target_model.n_evidence == n_init + n1
+    assert bolfi.n_evidence == n_init + n1
+    assert bolfi.n_precomputed_evidence == n_init
+    assert bolfi.n_initial_evidence == n_init
 
     n2 = 5
-    bo.infer(n_init + n1 + n2)
+    bolfi.infer(n_init + n1 + n2)
 
-    assert bo.target_model.n_evidence == n_init + n1 + n2
-    assert bo.n_evidence == n_init + n1 + n2
-    assert bo.n_precomputed_evidence == n_init
-    assert bo.n_initial_evidence == n_init
+    assert bolfi.target_model.n_evidence == n_init + n1 + n2
+    assert bolfi.n_evidence == n_init + n1 + n2
+    assert bolfi.n_precomputed_evidence == n_init
+    assert bolfi.n_initial_evidence == n_init
 
-    assert np.array_equal(bo.target_model._gp.X[:n_init, 0], res_init.samples_array[:, 0])
+    assert np.array_equal(bolfi.target_model._gp.X[:n_init, 0], res_init.samples_array[:, 0])
 
 
 @pytest.mark.usefixtures('with_all_clients')
 def test_async(ma2):
     bounds = {n: (-2, 2) for n in ma2.parameter_names}
-    bo = elfi.BayesianOptimization(
+    bolfi = elfi.BOLFI(
         ma2, 'd', initial_evidence=0, update_interval=2, batch_size=2, bounds=bounds, async_acq=True)
     n_samples = 5
-    bo.infer(n_samples)
+    bolfi.infer(n_samples)
 
 
 @pytest.mark.usefixtures('with_all_clients')
-def test_BO_works_with_zero_init_samples(ma2):
+def test_BOLFI_works_with_zero_init_samples(ma2):
     log_d = elfi.Operation(np.log, ma2['d'], name='log_d')
     bounds = {n: (-2, 2) for n in ma2.parameter_names}
-    bo = elfi.BayesianOptimization(
+    bolfi = elfi.BOLFI(
         log_d, initial_evidence=0, update_interval=4, batch_size=2, bounds=bounds)
-    assert bo.target_model.n_evidence == 0
-    assert bo.n_evidence == 0
-    assert bo.n_precomputed_evidence == 0
-    assert bo.n_initial_evidence == 0
+    assert bolfi.n_evidence == 0
+    assert bolfi.n_precomputed_evidence == 0
+    assert bolfi.n_initial_evidence == 0
     n_samples = 4
-    bo.infer(n_samples)
-    assert bo.target_model.n_evidence == n_samples
-    assert bo.n_evidence == n_samples
-    assert bo.n_precomputed_evidence == 0
-    assert bo.n_initial_evidence == 0
+    bolfi.infer(n_samples)
+    assert bolfi.target_model.n_evidence == n_samples
+    assert bolfi.n_evidence == n_samples
+    assert bolfi.n_precomputed_evidence == 0
+    assert bolfi.n_initial_evidence == 0
 
 
 def test_acquisition():

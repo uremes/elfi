@@ -89,7 +89,7 @@ def test_bo(ma2):
     bounds = {'t1': (-2, 2), 't2': (-1, 1)}
     anv = .1
 
-    bo = elfi.BayesianOptimization(
+    bolfi = elfi.BOLFI(
         ma2,
         'd',
         initial_evidence=init_evi,
@@ -97,10 +97,10 @@ def test_bo(ma2):
         batch_size=bs,
         bounds=bounds,
         acq_noise_var=anv)
-    res = bo.infer(n_evidence=n_evi)
-    seed = bo.seed
+    res = bolfi.infer(n_evidence=n_evi)
+    seed = bolfi.seed
 
-    bo = elfi.BayesianOptimization(
+    bolfi = elfi.BOLFI(
         ma2,
         'd',
         seed=seed,
@@ -109,9 +109,9 @@ def test_bo(ma2):
         batch_size=bs,
         bounds=bounds,
         acq_noise_var=anv)
-    res_same = bo.infer(n_evidence=n_evi)
+    res_same = bolfi.infer(n_evidence=n_evi)
 
-    bo = elfi.BayesianOptimization(
+    bolfi = elfi.BOLFI(
         ma2,
         'd',
         initial_evidence=init_evi,
@@ -119,7 +119,7 @@ def test_bo(ma2):
         batch_size=bs,
         bounds=bounds,
         acq_noise_var=anv)
-    res_diff = bo.infer(n_evidence=n_evi)
+    res_diff = bolfi.infer(n_evidence=n_evi)
 
     check_consistent_sample(res, res_diff, res_same)
 
