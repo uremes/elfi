@@ -1,6 +1,7 @@
 """This module contains wrappers for using BoTorch in ELFI."""
 
 import contextlib
+import copy
 
 import numpy as np
 import torch
@@ -64,7 +65,7 @@ class BoTorchModel(GPyRegression):
 
         self.train_x = []
         self.train_y = []
-        self.model = None
+        self._gp = None
 
     def predict(self, x, noiseless=False):
         """Return the model mean and variance at x.
@@ -86,12 +87,15 @@ class BoTorchModel(GPyRegression):
         """
         x = torch.tensor(x, dtype=torch.double).reshape(-1, self.input_dim)
 
+        if self._gp is None:
+            return (np.zeros(x.shape[0], 1), np.ones(x.shape[0], 1))
+
         # activate evaluation mode
-        self.model.eval()
-        self.model.likelihood.eval()
+        self._gp.eval()
+        self._gp.likelihood.eval()
 
         with torch.no_grad(), self.computation_context:
-            pred = self.model.posterior(x, observation_noise=not(noiseless))
+            pred = self._gp.posterior(x, observation_noise=not(noiseless))
 
         m = self.sign * pred.mean.detach().numpy().reshape(-1, 1)
         v = pred.variance.detach().numpy().reshape(-1, 1)
@@ -134,15 +138,18 @@ class BoTorchModel(GPyRegression):
         x = torch.tensor(x, dtype=torch.double).reshape(-1, self.input_dim)
         x.requires_grad = True
 
+        if self._gp is None:
+            return (np.zeros(x.shape[0], self.input_dim), np.zeros(x.shape[0], self.input_dim))
+
         # activate evaluation mode
-        self.model.eval()
+        self._gp.eval()
 
         # define the mean and variance function that we want to differentiate
         def m(x):
-            return self.model.posterior(x).mean.sum()
+            return self._gp.posterior(x).mean.sum()
 
         def v(x):
-            return self.model.posterior(x).variance.sum()
+            return self._gp.posterior(x).variance.sum()
 
         with self.computation_context:
             dmdx = torch.autograd.functional.jacobian(m, x)
@@ -169,12 +176,15 @@ class BoTorchModel(GPyRegression):
         x = torch.tensor(x, dtype=torch.double).reshape(-1, self.input_dim)
         x.requires_grad = True
 
+        if self._gp is None:
+            return np.zeros(x.shape[0], self.input_dim)
+
         # activate evaluation mode
-        self.model.eval()
+        self._gp.eval()
 
         # define the function we want to differentiate
         def m(x):
-            return self.model.posterior(x).mean.sum()
+            return self._gp.posterior(x).mean.sum()
 
         with self.computation_context:
             dmdx = torch.autograd.functional.jacobian(m, x)
@@ -195,50 +205,65 @@ class BoTorchModel(GPyRegression):
         y = self.sign * y
         self.train_x.append(x)
         self.train_y.append(y)
+        xt = torch.tensor(np.array(self.train_x), dtype=torch.double).reshape(-1, self.input_dim)
+        yt = torch.tensor(np.array(self.train_y), dtype=torch.double).reshape(-1, 1)
 
-        if self.model is not None:
-            self._init_model(state_dict=self.model.state_dict())
+        if self._gp is None:
+            # initialise
+            self._gp = self._make_model_instance(xt, yt)
+        else:
+            # reconstruct with new data
+            self._gp = self._make_model_instance(xt, yt, state_dict=self._gp.state_dict())
 
         if optimize:
             self.optimize()
 
     def optimize(self):
         """Optimize model fit."""
+        if self._gp is None:
+            raise RuntimeError('Model has not been initialised.')
 
-        if self.model is None:
-            self._init_model()
-
-        mll = self.mll_class(self.model.likelihood, self.model, **self.mll_options)
+        mll = self.mll_class(self._gp.likelihood, self._gp, **self.mll_options)
         fit_gpytorch_model(mll)
 
-    def _init_model(self, state_dict=None):
-
-        x = torch.tensor(np.array(self.train_x), dtype=torch.double).reshape(-1, self.input_dim)
-        y = torch.tensor(np.array(self.train_y), dtype=torch.double).reshape(-1, 1)
-        self.model = self.model_class(x, y, **self.model_options)
+    def _make_model_instance(self, x, y, state_dict=None):
+        model = self.model_class(x, y, **self.model_options)
         if state_dict is not None:
-            self.model.load_state_dict(state_dict)
+            model.load_state_dict(state_dict)
+        return model
+
+    @property
+    def n_evidence(self):
+        """Return the number of observed samples."""
+        return len(self.train_x)
 
     @property
     def X(self):
+        """Return input evidence."""
         return np.array(self.train_x).reshape(-1, self.input_dim)
 
     @property
     def Y(self):
+        """Return output evidence."""
         return self.sign * np.array(self.train_y).reshape(-1, 1)
 
     @property
-    def n_evidence(self):
-        return len(self.train_x)
+    def noise(self):
+        """Return the noise."""
+        if self._gp is None:
+            return None
+        else:
+            return self._gp.likelihood.noise.detach().numpy()
 
     @property
     def instance(self):
-        return self.model
+        """Return the gp instance."""
+        return self._gp
 
-    # because bayesian optimisation in ELFI assumes that a target model has attribute _gp and that it can access it
-    @property
-    def _gp(self):
-        return self.model
+    def copy(self):
+        """Return a copy of current instance."""
+        return copy.deepcopy(self)
+
 
 class BoTorchAcquisition(AcquisitionBase):
 
@@ -254,8 +279,6 @@ class BoTorchAcquisition(AcquisitionBase):
         ----------
         model : BoTorchModel
             Gaussian process regression model.
-        bounds : Dict[str, Sequence[float, float]] or List[Sequence[float, float]]
-            Lower and upper bound for each input parameter.
         acq_class : Type[botorch.acquisition.AcquisitionFunction]
             Acquisition function type.
         acq_options : Dict[str, Any], optional
@@ -267,7 +290,7 @@ class BoTorchAcquisition(AcquisitionBase):
         self.model = model
         self.input_dim = self.model.input_dim
         self.bounds = torch.tensor(np.transpose(self.model.bounds), dtype=torch.double)
-        
+
         self.acq_class = acq_class
         self.acq_options = acq_options
         self.optim_params = optim_params or {'num_restarts': 5, 'raw_samples': 20}
@@ -313,7 +336,7 @@ class BoTorchAcquisition(AcquisitionBase):
 
         """
         if self.model.instance is None:
-            self.model.optimize()
+            raise RuntimeError('Model has not been initialised.')
 
         acq_function = self.acq_class(self.model.instance, **self.acq_options)
         x, _ = optimize_acqf(acq_function, bounds=self.bounds, q=n, **self.optim_params)
