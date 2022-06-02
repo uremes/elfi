@@ -1,6 +1,5 @@
 """This module contains wrappers for using BoTorch in ELFI."""
 
-import contextlib
 import copy
 
 import numpy as np
@@ -58,10 +57,7 @@ class BoTorchModel(GPyRegression):
         self.mll_class = mll_class or ExactMarginalLogLikelihood
         self.mll_options = mll_options or {}
         self.sign = 1 if not negate else -1
-        if fast_pred_var:
-            self.computation_context = fast_pred_var()
-        else:
-            self.computation_context = contextlib.nullcontext()
+        self.use_fast_pred_var = use_fast_pred_var
 
         self.train_x = []
         self.train_y = []
@@ -94,7 +90,7 @@ class BoTorchModel(GPyRegression):
         self._gp.eval()
         self._gp.likelihood.eval()
 
-        with torch.no_grad(), self.computation_context:
+        with torch.no_grad(), fast_pred_var(self.use_fast_pred_var):
             pred = self._gp.posterior(x, observation_noise=not(noiseless))
 
         m = self.sign * pred.mean.detach().numpy().reshape(-1, 1)
@@ -151,7 +147,7 @@ class BoTorchModel(GPyRegression):
         def v(x):
             return self._gp.posterior(x).variance.sum()
 
-        with self.computation_context:
+        with fast_pred_var(self.use_fast_pred_var):
             dmdx = torch.autograd.functional.jacobian(m, x)
             dvdx = torch.autograd.functional.jacobian(v, x)
 
@@ -186,7 +182,7 @@ class BoTorchModel(GPyRegression):
         def m(x):
             return self._gp.posterior(x).mean.sum()
 
-        with self.computation_context:
+        with fast_pred_var(self.use_fast_pred_var):
             dmdx = torch.autograd.functional.jacobian(m, x)
 
         return self.sign * dmdx.numpy().reshape(-1, self.input_dim)
@@ -281,8 +277,8 @@ class BoTorchAcquisition(AcquisitionBase):
             Gaussian process regression model.
         acq_class : Type[botorch.acquisition.AcquisitionFunction]
             Acquisition function type.
-        acq_options : Dict[str, Any], optional
-            acq_class constructor parameters
+        acq_options : Dict[str, Any]
+            acq_class constructor parameters.
         optim_params : Dict[str, Any], optional
             Acquisition function optimisation parameters.
 
@@ -293,7 +289,12 @@ class BoTorchAcquisition(AcquisitionBase):
 
         self.acq_class = acq_class
         self.acq_options = acq_options
-        self.optim_params = optim_params or {'num_restarts': 5, 'raw_samples': 20}
+        self.optim_params = optim_params or {'num_restarts': 10, 'raw_samples': 500}
+
+        self.callable_options = {}
+        for option in self.acq_options:
+            if callable(self.acq_options[option]):
+                self.callable_options[option] = self.acq_options[option]
 
     def evaluate(self, x, t=None):
         """Evaluate the acquisition function value at x.
@@ -315,9 +316,7 @@ class BoTorchAcquisition(AcquisitionBase):
             return np.zeros((x.shape[0], 1))
 
         x = torch.tensor(x, dtype=torch.double).reshape(-1, 1, self.input_dim)
-        acq_function = self.acq_class(self.model.instance, **self.acq_options)
-
-        return acq_function(x).detach().numpy()
+        return self.acq_function(x).detach().numpy()
 
     def acquire(self, n, t=None):
         """Return the next batch of acquisition points.
@@ -338,7 +337,11 @@ class BoTorchAcquisition(AcquisitionBase):
         if self.model.instance is None:
             raise RuntimeError('Model has not been initialised.')
 
-        acq_function = self.acq_class(self.model.instance, **self.acq_options)
-        x, _ = optimize_acqf(acq_function, bounds=self.bounds, q=n, **self.optim_params)
-
+        x, _ = optimize_acqf(self.acq_function, bounds=self.bounds, q=n, **self.optim_params)
         return x.numpy()
+
+    @property
+    def acq_function(self):
+        for option in self.callable_options:
+            self.acq_options[option] = self.callable_options[option](self.model)
+        return self.acq_class(self.model.instance, **self.acq_options)
