@@ -140,16 +140,10 @@ class BoTorchModel(GPyRegression):
         # activate evaluation mode
         self._gp.eval()
 
-        # define the mean and variance function that we want to differentiate
-        def m(x):
-            return self._gp.posterior(x).mean.sum()
-
-        def v(x):
-            return self._gp.posterior(x).variance.sum()
-
         with fast_pred_var(self.use_fast_pred_var):
-            dmdx = torch.autograd.functional.jacobian(m, x)
-            dvdx = torch.autograd.functional.jacobian(v, x)
+            post = self._gp.posterior(x)
+            dmdx = torch.autograd.grad(post.mean.sum(), x, retain_graph=True)[0]
+            dvdx = torch.autograd.grad(post.variance.sum(), x)[0]
 
         dmdx = self.sign * dmdx.numpy().reshape(-1, self.input_dim)
         dvdx = dvdx.numpy().reshape(-1, self.input_dim)
@@ -178,12 +172,9 @@ class BoTorchModel(GPyRegression):
         # activate evaluation mode
         self._gp.eval()
 
-        # define the function we want to differentiate
-        def m(x):
-            return self._gp.posterior(x).mean.sum()
-
         with fast_pred_var(self.use_fast_pred_var):
-            dmdx = torch.autograd.functional.jacobian(m, x)
+            post = self._gp.posterior(x)
+            dmdx = torch.autograd.grad(post.mean.sum(), x)[0]
 
         return self.sign * dmdx.numpy().reshape(-1, self.input_dim)
 
