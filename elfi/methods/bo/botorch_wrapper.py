@@ -8,6 +8,7 @@ from botorch.fit import fit_gpytorch_model
 from botorch.models import SingleTaskGP
 from botorch.optim import optimize_acqf
 from gpytorch.mlls import ExactMarginalLogLikelihood
+from gpytorch.models import GP
 from gpytorch.settings import fast_pred_var
 
 from elfi.methods.bo.acquisition import AcquisitionBase
@@ -19,10 +20,9 @@ class BoTorchModel(GPyRegression):
     def __init__(self,
                  parameter_names,
                  bounds,
-                 model_class=None,
+                 model_constructor=None,
                  model_options=None,
-                 mll_class=None,
-                 mll_options=None,
+                 model_optimizer=None,
                  negate=False,
                  use_fast_pred_var=True,
                  seed=None):
@@ -34,14 +34,12 @@ class BoTorchModel(GPyRegression):
             Input parameter names.
         bounds : Dict[str, Sequence[float, float]].
             Lower and upper bound for each input parameter.
-        model_class : Type[botorch.models.Model], optional
-            Model type.
+        model_constructor : callable, optional
+            Function that creates a model instance.
         model_options : Dict[str, Any], optional
-            model_class constructor parameters
-        mll_class : Type[gpytorch.mlls.MarginalLogLikelihood], optional
-            Model fit type.
-        mll_options : Dict[str, Any], optional
-            mll_class constructor parameters
+            Model constructor parameters.
+        model_optimizer : callable, optional
+            Function that optimizes model instance.
         negate : bool, optional
             If True, negate target values.
         use_fast_pred_var : bool, optional
@@ -52,10 +50,9 @@ class BoTorchModel(GPyRegression):
         self.parameter_names = parameter_names
         self.input_dim = len(self.parameter_names)
         self.bounds = [bounds[param] for param in parameter_names]
-        self.model_class = model_class or SingleTaskGP
+        self.model_constructor = model_constructor or self._make_model
         self.model_options = model_options or {}
-        self.mll_class = mll_class or ExactMarginalLogLikelihood
-        self.mll_options = mll_options or {}
+        self.model_optimizer = model_optimizer or self._optimize_model
         self.sign = 1 if not negate else -1
         self.use_fast_pred_var = use_fast_pred_var
 
@@ -197,32 +194,35 @@ class BoTorchModel(GPyRegression):
 
         if self._gp is None:
             # initialise
-            self._gp = self._make_model_instance(xt, yt)
+            self._gp = self.model_constructor(xt, yt, self.model_options)
         else:
             # reconstruct with new data
-            self._gp = self._make_model_instance(xt, yt, state_dict=self._gp.state_dict())
+            state_dict = self._gp.state_dict()
+            self._gp = self.model_constructor(xt, yt, self.model_options, state_dict=state_dict)
 
         if optimize:
-            self.optimize()
+            self.model_optimizer(self._gp)
 
     def optimize(self):
-        """Optimize model fit."""
+        """Optimize model hyperparameters."""
         if self._gp is None:
             raise RuntimeError('Model has not been initialised.')
+        self.model_optimizer(self._gp)
 
-        mll = self.mll_class(self._gp.likelihood, self._gp, **self.mll_options)
-        fit_gpytorch_model(mll)
-
-    def _make_model_instance(self, x, y, state_dict=None):
-        model = self.model_class(x, y, **self.model_options)
+    def _make_model(self, x, y, options, state_dict=None):
+        model = SingleTaskGP(x, y, **options)
         if state_dict is not None:
             model.load_state_dict(state_dict)
         return model
 
+    def _optimize_model(self, model):
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_model(mll)
+
     @property
     def n_evidence(self):
         """Return the number of observed samples."""
-        return len(self.train_x)
+        return np.array(self.train_y).size
 
     @property
     def X(self):
@@ -280,7 +280,13 @@ class BoTorchAcquisition(AcquisitionBase):
 
         self.acq_class = acq_class
         self.acq_options = acq_options
-        self.optim_params = optim_params or {'num_restarts': 10, 'raw_samples': 500}
+        self.optim_params = optim_params or {}
+
+        if not 'num_restarts' in self.optim_params:
+            self.optim_params['num_restarts'] = 10
+
+        if not 'raw_samples' in self.optim_params:
+            self.optim_params['raw_samples'] = 50 * self.optim_params['num_restarts']
 
         self.callable_options = {}
         for option in self.acq_options:
