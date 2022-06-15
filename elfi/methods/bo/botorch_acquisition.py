@@ -1,6 +1,9 @@
+import numpy as np
 import torch
 from botorch.optim import optimize_acqf
 from botorch.acquisition import UpperConfidenceBound
+
+from elfi.methods.bo.botorch_wrapper import BoTorchAcquisition
 
 class BoTorchLCBSC(BoTorchAcquisition):
     
@@ -21,14 +24,11 @@ class BoTorchLCBSC(BoTorchAcquisition):
             Acquisition function optimisation parameters.
 
         """
-        self.model = model
-        self.input_dim = self.model.input_dim
-        self.bounds = torch.tensor(np.transpose(self.model.bounds), dtype=torch.double)
-        
-        self.acq_class = UpperConfidenceBound
+
+        acq_class = UpperConfidenceBound
+        acq_options = {'beta': 1/exploration_rate, 'maximize': False}
+        super().__init__(model, acq_class, acq_options, optim_params=optim_params)
         self.exploration_rate = exploration_rate
-        self.acq_options = {'beta': 1/self.exploration_rate, 'maximize': False}
-        self.optim_params = optim_params or {'num_restarts': 10, 'raw_samples': 500}
 
     def evaluate(self, x, t=None):
         """Evaluate the acquisition function value at x.
