@@ -192,7 +192,8 @@ class BSL(ModelBased):
              parameter_names=self.parameter_names
         )
 
-    def _current_params(self):
+    @property
+    def current_params(self):
         """Return parameter values explored in the current round.
 
         BSL runs simulations with the candidate parameter values stored in method state.
@@ -255,7 +256,7 @@ class BSL(ModelBased):
             if n == 0:
                 raise RuntimeError('Estimated likelihood not finite on initialisation round.')
             logger.warning('Estimated likelihood not finite.')
-        logger.debug('SL {} at {}'.format(loglikelihood, self._current_params()))
+        logger.debug('SL {} at {}'.format(loglikelihood, self.current_params))
 
         # update state
         self.state['logposterior'][n] = loglikelihood + self.state['logprior'][n]
