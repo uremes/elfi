@@ -39,6 +39,8 @@ class BOLFIRE(ParameterInference):
                  update_interval=1,
                  target_model=None,
                  acquisition_method=None,
+                 batches_round=None,
+                 use_batch_limit=False,
                  *args, **kwargs):
         """Initialize the BOLFIRE method.
 
@@ -103,6 +105,17 @@ class BOLFIRE(ParameterInference):
         self.n_initial_evidence = self._resolve_n_initial_evidence(n_initial_evidence)
         self.acquisition_method = self._resolve_acquisition_method(acquisition_method)
 
+        # Adaptive simulation count
+        max_batches_round = int(self.n_training_data/self.batch_size)
+        if batches_round is not None:
+            self.n_batches_round = np.array(batches_round)
+            assert self.n_batches_round[0] <= max_batches_round
+        else:
+            self.n_batches_round = np.array([max_batches_round])
+        self._index = 0
+        self.use_batch_limit = use_batch_limit
+        self.is_multi = self.n_batches_round.size > 1
+
         # Initialize state dictionary
         self.state['n_evidence'] = 0
         self.state['last_GP_update'] = self.n_initial_evidence
@@ -120,6 +133,14 @@ class BOLFIRE(ParameterInference):
         """Return the number of acquired evidence points."""
         return self.state['n_evidence']
 
+    @property
+    def finished(self):
+        """Check whether objective has been reached."""
+        if self.use_batch_limit:
+            return self.objective['n_batches'] <= self.state['n_batches']
+        else:
+            return self.objective['n_evidence'] <= self.state['n_evidence']
+
     def set_objective(self, n_evidence):
         """Set an objective for inference. You can continue BO by giving a larger n_evidence.
 
@@ -131,6 +152,7 @@ class BOLFIRE(ParameterInference):
         """
         if n_evidence < self.n_evidence:
             logger.warning('Requesting less evidence than there already exists.')
+        self.objective['n_evidence'] = n_evidence
         self.objective['n_batches'] = n_evidence * int(self.n_training_data / self.batch_size)
 
     def extract_result(self):
@@ -155,7 +177,7 @@ class BOLFIRE(ParameterInference):
         super(BOLFIRE, self).update(batch, batch_index)
 
         self._merge_batch(batch)
-        if self._round_sim == self.n_training_data:
+        if self.state['n_batches_round'] == self.n_batches_round[self._index]:
             self._update_logratio_model()
             self._init_round()
 
@@ -438,7 +460,7 @@ class BOLFIRE(ParameterInference):
 
     def _init_round(self):
         """Initialize data collection round."""
-        self._round_sim = 0
+        self.state['n_batches_round'] = 0
 
         # Set new parameter values
         if self.n_evidence < self.n_initial_evidence:
@@ -447,16 +469,18 @@ class BOLFIRE(ParameterInference):
         else:
             # Acquire parameter values from the acquisition function
             t = self.n_evidence - self.n_initial_evidence
-            self._params = self.acquisition_method.acquire(1, t)
+            if self.is_multi:
+                self._params, self._index = self.acquisition_method.acquire(1, t)
+            else:
+                self._params = self.acquisition_method.acquire(1, t)
 
-    def _new_round(self, batch_index):
-        """Check whether batch_index starts a new data collection round."""
-        return (batch_index * self.batch_size) % self.n_training_data == 0
+        # Maximum batch index that can be prepared
+        self.batch_index_max = self.state['n_batches'] + self.n_batches_round[self._index]
 
     def _allow_submit(self, batch_index):
         """Check whether batch_index can be prepared."""
         # Do not prepare batches with new parameter values until the current round is finished
-        if self._new_round(batch_index) and self.batches.has_pending:
+        if batch_index >= self.batch_index_max and self.batches.has_pending:
             return False
         else:
             return super(BOLFIRE, self)._allow_submit(batch_index)
@@ -464,25 +488,53 @@ class BOLFIRE(ParameterInference):
     def _merge_batch(self, batch):
         """Add batch to collected data."""
         data = batch_to_arr2d(batch, self.feature_names)
-        self._likelihood[self._round_sim:self._round_sim + self.batch_size] = data
-        self._round_sim += self.batch_size
+        n_sim = int(self.state['n_batches_round'] * self.batch_size)
+        self._likelihood[n_sim:n_sim + self.batch_size] = data
+        self.state['n_batches_round'] += 1
+
+    @staticmethod
+    def extend_input(x, index=0):
+        """Return x extended with task index (defaults to target task)."""
+        inds = np.full((len(x), 1), index) if np.isscalar(index) else index.reshape(-1, 1)
+        x = np.hstack((x, inds))
+        return x
 
     def _update_logratio_model(self):
         """Calculate log-ratio based on collected data and update surrogate model."""
-        # Predict log-ratio
-        X, y = self._generate_training_data(self._likelihood, self.marginal)
-        negative_log_ratio_value = -1 * self.predict_log_ratio(X, y, self.observed)
+        n_training_data = int(self.n_batches_round[self._index] * self.batch_size)
+        inds = self._random_state.permutation(np.arange(self.marginal.shape[0]))
+        marginal = self.marginal[inds[:n_training_data]]
+        likelihood = self._likelihood[:n_training_data]
 
-        # Update classifier attributes list
-        self.classifier_attributes += [self.classifier.attributes]
+        if self.is_multi and self.n_evidence < self.n_initial_evidence:
+            # Predict log-ratio at all fidelities
+            negative_log_ratio_value = np.zeros(self.n_batches_round.shape)
+            for index, n_batches in enumerate(self.n_batches_round):
+                n_sim = int(n_batches * self.batch_size)
+                X, y = self._generate_training_data(likelihood[:n_sim], marginal[:n_sim])
+                negative_log_ratio_value[index] = -1 * self.predict_log_ratio(X, y, self.observed)
+                self.classifier_attributes += [self.classifier.attributes]
+        else:
+            # Predict log-ratio
+            X, y = self._generate_training_data(likelihood, marginal)
+            negative_log_ratio_value = -1 * self.predict_log_ratio(X, y, self.observed)
+            self.classifier_attributes += [self.classifier.attributes]
 
         # BO part
-        self.state['n_evidence'] += 1
-        parameter_values = self._params
+        if self.is_multi:
+            if self.n_evidence < self.n_initial_evidence:
+                params = np.repeat(self._params, self.n_batches_round.size, axis=0)
+                inds = np.arange(self.n_batches_round.size)
+                parameter_values = self.extend_input(params, inds)
+            else:
+                parameter_values = self.extend_input(self._params, self._index)
+        else:
+            parameter_values = self._params
         optimize = self._should_optimize()
         self.target_model.update(parameter_values, negative_log_ratio_value, optimize)
+        self.state['n_evidence'] += 1
         if optimize:
-            self.state['last_GP_update'] = self.target_model.n_evidence
+            self.state['last_GP_update'] = self.state['n_evidence']
 
     def _generate_training_data(self, likelihood, marginal):
         """Generate training data."""
@@ -492,6 +544,6 @@ class BOLFIRE(ParameterInference):
 
     def _should_optimize(self):
         """Check whether GP hyperparameters should be optimized."""
-        current = self.target_model.n_evidence + 1
+        current = self.state['n_evidence'] + 1
         next_update = self.state['last_GP_update'] + self.update_interval
         return current >= self.n_initial_evidence and current >= next_update
