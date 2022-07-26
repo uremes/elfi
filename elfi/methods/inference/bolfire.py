@@ -492,13 +492,6 @@ class BOLFIRE(ParameterInference):
         self._likelihood[n_sim:n_sim + self.batch_size] = data
         self.state['n_batches_round'] += 1
 
-    @staticmethod
-    def extend_input(x, index=0):
-        """Return x extended with task index (defaults to target task)."""
-        inds = np.full((len(x), 1), index) if np.isscalar(index) else index.reshape(-1, 1)
-        x = np.hstack((x, inds))
-        return x
-
     def _update_logratio_model(self):
         """Calculate log-ratio based on collected data and update surrogate model."""
         n_training_data = int(self.n_batches_round[self._index] * self.batch_size)
@@ -521,17 +514,17 @@ class BOLFIRE(ParameterInference):
             self.classifier_attributes += [self.classifier.attributes]
 
         # BO part
+        optimize = self._should_optimize()
         if self.is_multi:
             if self.n_evidence < self.n_initial_evidence:
                 params = np.repeat(self._params, self.n_batches_round.size, axis=0)
                 inds = np.arange(self.n_batches_round.size)
-                parameter_values = self.extend_input(params, inds)
             else:
-                parameter_values = self.extend_input(self._params, self._index)
+                params = self._params
+                inds = self._index
+            self.target_model.update(params, negative_log_ratio_value, inds, optimize)
         else:
-            parameter_values = self._params
-        optimize = self._should_optimize()
-        self.target_model.update(parameter_values, negative_log_ratio_value, optimize)
+            self.target_model.update(self._params, negative_log_ratio_value, optimize)
         self.state['n_evidence'] += 1
         if optimize:
             self.state['last_GP_update'] = self.state['n_evidence']
