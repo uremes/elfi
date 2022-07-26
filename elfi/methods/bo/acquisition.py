@@ -813,3 +813,25 @@ class UniformAcquisition(AcquisitionBase):
         bounds = np.stack(self.model.bounds)
         return ss.uniform(bounds[:, 0], bounds[:, 1] - bounds[:, 0]) \
             .rvs(size=(n, self.model.input_dim), random_state=self.random_state)
+
+class MultiTaskAcquisition(AcquisitionBase):
+
+    def __init__(self, acquisition_method, cost):
+        self.acquisition_method = acquisition_method
+        self.model = acquisition_method.model
+        self.num_tasks = self.model.num_tasks
+        self.cost = np.array(cost)
+        assert cost.size == self.num_tasks # TODO: raise error
+
+    def acquire(self, n, t=None):
+        #print('iteration {}'.format(t))
+        x = self.acquisition_method.acquire(n, t)
+        mean, cov = self.model.predict_multi(x, noiseless=False)
+        information = cov[0, :]**2/np.diag(cov)
+        information_cost_ratio = information/self.cost
+        index = np.argmax(information_cost_ratio)
+        #print(x)
+        #print(information)
+        #print(information_cost_ratio)
+        #print(index)
+        return x, index

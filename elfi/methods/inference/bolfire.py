@@ -108,8 +108,10 @@ class BOLFIRE(ParameterInference):
         # Adaptive simulation count
         max_batches_round = int(self.n_training_data/self.batch_size)
         if batches_round is not None:
-            self.n_batches_round = np.array(batches_round)
+            self.n_batches_round = np.array(batches_round).astype(int)
             assert self.n_batches_round[0] <= max_batches_round
+            assert np.all(self.n_batches_round >= 1)
+            assert np.all(self.n_batches_round <= self.n_batches_round[0])
         else:
             self.n_batches_round = np.array([max_batches_round])
         self._index = 0

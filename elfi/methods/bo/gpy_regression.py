@@ -366,3 +366,120 @@ class GPyRegression:
     def __copy__(self):
         """Return a copy of current instance."""
         return self.copy()
+
+class GPyRegressionMulti(GPyRegression):
+
+    @staticmethod
+    def extend_input(x, index=0):
+        """
+        Returns x extended with task index (defaults to 0)
+        """
+        x = np.atleast_2d(x)
+        inds = np.full((len(x), 1), index) if np.isscalar(index) else index.reshape(-1, 1)
+        x = np.hstack((x, inds))
+        return x
+
+    def update(self, x, y, inds, optimize=False):
+        """Update the GP model with new data.
+
+        Parameters
+        ----------
+        x : np.array
+        y : np.array
+        inds : np.array
+        optimize : bool, optional
+            Whether to optimize hyperparameters.
+
+        """
+        # Must cast these as 2d for GPy
+        x = x.reshape((-1, self.input_dim))
+        y = y.reshape((-1, 1))
+        inds = inds.reshape((-1, 1))
+
+        if self._gp is None:
+            self._init_gp(x, y, inds)
+        else:
+            # Extend inputs
+            x = self.extend_input(x, inds)
+            # Reconstruct with new data
+            x = np.r_[self._gp.X, x]
+            y = np.r_[self._gp.Y, y]
+            inds = np.r_[self._gp.Y_metadata['output_index'], inds]
+            self._gp.Y_metadata = {'output_index': inds.astype(int)}
+            self._gp.set_XY(x, y)
+
+        if optimize:
+            self.optimize()
+
+    def _init_gp(self, x, y, inds):
+        counts = np.bincount(np.squeeze(inds.astype(int)), minlength=self.num_tasks)
+        assert np.all(counts > 0) # TODO: raise error
+        self._kernel_is_default = False
+        kernel = self.gp_params.get('kernel')
+        likelihoods_list = self.gp_params.get('likelihoods_list')
+        self._gp = self._make_gpy_instance(x, y, inds, kernel, likelihoods_list)
+
+    def _make_gpy_instance(self, x, y, inds, kernel, likelihoods_list):
+        # convert observations to list
+        XX = [x[np.squeeze(inds) == index] for index in range(self.num_tasks)]
+        YY = [y[np.squeeze(inds) == index] for index in range(self.num_tasks)]
+        # initialise model
+        model = GPy.models.GPCoregionalizedRegression(XX, YY, kernel=kernel, likelihoods_list=likelihoods_list)
+        return model
+
+    def predict(self, x, noiseless=False, index=0):
+        # Ensure it's 2d for GPy
+        x = np.asanyarray(x).reshape((-1, self.input_dim))
+
+        if self._gp is None:
+            return np.zeros((x.shape[0], 1)), np.ones((x.shape[0], 1))
+
+        # extended input
+        x = self.extend_input(x, index)
+        # build metadata
+        meta = {'output_index': x[:, -1].astype(int)}
+        # predict output
+        return self._gp.predict(x, Y_metadata=meta, include_likelihood=not(noiseless))
+
+    def predict_multi(self, x, full_cov=True, noiseless=False):
+        x = np.asanyarray(x).reshape((-1, self.input_dim))
+        inds = np.arange(self.num_tasks)
+        xs = np.vstack([self.extend_input(x, index=i) for i in inds])
+        meta = {'output_index': xs[:, -1].astype(int)}
+        return self._gp.predict(xs, Y_metadata=meta, full_cov=full_cov, include_likelihood=not(noiseless))
+
+    def predictive_gradients(self, x, index=0):
+        # Ensure it's 2d for GPy
+        x = np.asanyarray(x).reshape((-1, self.input_dim))
+
+        if self._gp is None:
+            return np.zeros((x.shape[0], self.input_dim)), np.zeros((x.shape[0], self.input_dim))
+
+        # extend input
+        x = self.extend_input(x, index)
+
+        grad_mu, grad_var = self._gp.predictive_gradients(x)
+        grad_mu = grad_mu[:, :, 0]  # Assume 1D output
+        # remove index
+        return grad_mu[:,:-1], grad_var[:,:-1]
+
+    def optimize(self):
+        self._gp.optimize()
+
+    def get_X(self, index=0):
+        return self._gp.X[np.where(self._gp.X[:, -1]==index)][:, :-1]
+
+    def get_Y(self, index=0):
+        return self._gp.Y[np.where(self._gp.X[:, -1]==index)]
+
+    @property
+    def X(self):
+        return self.get_X(index=0)
+
+    @property
+    def Y(self):
+        return self.get_Y(index=0)
+
+    @property
+    def inds(self):
+        return self._gp.X[:, -1].astype(int)
