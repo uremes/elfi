@@ -39,8 +39,6 @@ class BOLFIRE(ParameterInference):
                  update_interval=1,
                  target_model=None,
                  acquisition_method=None,
-                 batches_round=None,
-                 use_batch_limit=False,
                  *args, **kwargs):
         """Initialize the BOLFIRE method.
 
@@ -48,7 +46,7 @@ class BOLFIRE(ParameterInference):
         ----------
         model: ElfiModel
             Elfi graph used by the algorithm.
-        n_training_data: int
+        n_training_data: int or list
             Size of training data.
         feature_names: str or list, optional
             ElfiModel nodes used as features in classification. Default all Summary nodes.
@@ -82,7 +80,8 @@ class BOLFIRE(ParameterInference):
         super(BOLFIRE, self).__init__(model, output_names=None, *args, **kwargs)
 
         # Initialize attributes
-        self.n_training_data = self._resolve_n_training_data(n_training_data)
+        n_sim_round = self._resolve_n_training_data(n_training_data)
+        self.n_training_data = n_sim_round if isinstance(n_sim_round, int) else n_sim_round[0]
         self.feature_names = self._resolve_feature_names(self.model, feature_names)
         self.marginal = self._resolve_marginal(marginal, seed_marginal)
         self.classifier = self._resolve_classifier(classifier)
@@ -106,17 +105,14 @@ class BOLFIRE(ParameterInference):
         self.acquisition_method = self._resolve_acquisition_method(acquisition_method)
 
         # Adaptive simulation count
-        max_batches_round = int(self.n_training_data/self.batch_size)
-        if batches_round is not None:
-            self.n_batches_round = np.array(batches_round).astype(int)
-            assert self.n_batches_round[0] <= max_batches_round
-            assert np.all(self.n_batches_round >= 1)
-            assert np.all(self.n_batches_round <= self.n_batches_round[0])
-        else:
-            self.n_batches_round = np.array([max_batches_round])
+        self.is_multi = isinstance(n_sim_round, list)
         self._index = 0
-        self.use_batch_limit = use_batch_limit
-        self.is_multi = self.n_batches_round.size > 1
+        if self.is_multi:
+            self.n_batches_round = [int(n_sim/self.batch_size) for n_sim in n_sim_round]
+            assert np.all(np.array(self.n_batches_round) >= 1)
+            assert np.all(np.array(self.n_batches_round) <= self.n_batches_round[0])
+        else:
+            self.n_batches_round = [int(self.n_training_data/self.batch_size)]
 
         # Initialize state dictionary
         self.state['n_evidence'] = 0
@@ -138,24 +134,28 @@ class BOLFIRE(ParameterInference):
     @property
     def finished(self):
         """Check whether objective has been reached."""
-        if self.use_batch_limit:
-            return self.objective['n_batches'] <= self.state['n_batches']
-        else:
-            return self.objective['n_evidence'] <= self.state['n_evidence']
+        evidence_reached = self.objective['n_evidence'] <= self.state['n_evidence']
+        batches_reached = self.objective['n_batches'] <= self.state['n_batches']
+        return evidence_reached or batches_reached
 
-    def set_objective(self, n_evidence):
+    def set_objective(self, n_evidence, n_sim=None):
         """Set an objective for inference. You can continue BO by giving a larger n_evidence.
 
         Parameters
         ----------
         n_evidence: int
             Number of total evidence for the GP fitting. This includes any initial evidence.
+        n_sim: int, optional
+            Number of simulations. Inference stops when either n_evidence or n_sim is reached.
 
         """
         if n_evidence < self.n_evidence:
             logger.warning('Requesting less evidence than there already exists.')
         self.objective['n_evidence'] = n_evidence
-        self.objective['n_batches'] = n_evidence * int(self.n_training_data / self.batch_size)
+        if n_sim is None:
+            self.objective['n_batches'] = n_evidence * int(self.n_training_data / self.batch_size)
+        else:
+            self.objective['n_batches'] = int(n_sim / self.batch_size)
 
     def extract_result(self):
         """Extract the results from the current state."""
@@ -218,7 +218,7 @@ class BOLFIRE(ParameterInference):
         self.classifier.fit(X, y)
         return self.classifier.predict_log_likelihood_ratio(X_obs)
 
-    def fit(self, n_evidence, bar=True):
+    def fit(self, n_evidence, n_sim=None, bar=True):
         """Fit the surrogate model.
 
         That is, generate a regression model for the negative posterior value given the parameters.
@@ -228,6 +228,8 @@ class BOLFIRE(ParameterInference):
         ----------
         n_evidence: int
             Number of evidence for fitting.
+        n_sim: int, optional
+            Number of simulations. Inference stops when either n_evidence or n_sim is reached.
         bar: bool, optional
             Flag to show or hide the progress bar during fit.
 
@@ -238,7 +240,7 @@ class BOLFIRE(ParameterInference):
         """
         logger.info('BOLFIRE: Fitting the surrogate model...')
         if isinstance(n_evidence, int) and n_evidence > 0:
-            return self.infer(n_evidence, bar=bar)
+            return self.infer(n_evidence, n_sim=n_sim, bar=bar)
         raise TypeError('n_evidence must be a positive integer.')
 
     def sample(self,
@@ -375,7 +377,9 @@ class BOLFIRE(ParameterInference):
             if n_training_data % self.batch_size == 0:
                 return n_training_data
             raise ValueError('n_training_data must be a multiple of batch_size.')
-        raise TypeError('n_training_data must be a positive int.')
+        if isinstance(n_training_data, list):
+            return [self._resolve_n_training_data(n) for n in n_training_data]
+        raise TypeError('n_training_data must be a positive int or list.')
 
     def _resolve_feature_names(self, model, feature_names):
         """Resolve feature names to be used."""
@@ -503,7 +507,7 @@ class BOLFIRE(ParameterInference):
 
         if self.is_multi and self.n_evidence < self.n_initial_evidence:
             # Predict log-ratio at all fidelities
-            negative_log_ratio_value = np.zeros(self.n_batches_round.shape)
+            negative_log_ratio_value = np.zeros(len(self.n_batches_round))
             for index, n_batches in enumerate(self.n_batches_round):
                 n_sim = int(n_batches * self.batch_size)
                 X, y = self._generate_training_data(likelihood[:n_sim], marginal[:n_sim])
@@ -519,8 +523,8 @@ class BOLFIRE(ParameterInference):
         optimize = self._should_optimize()
         if self.is_multi:
             if self.n_evidence < self.n_initial_evidence:
-                params = np.repeat(self._params, self.n_batches_round.size, axis=0)
-                inds = np.arange(self.n_batches_round.size)
+                params = np.repeat(self._params, len(self.n_batches_round), axis=0)
+                inds = np.arange(len(self.n_batches_round))
             else:
                 params = self._params
                 inds = self._index
