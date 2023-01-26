@@ -7,7 +7,7 @@ import pytest
 import elfi
 from elfi.examples import arch, bdm, bignk, gauss, gnk, lotka_volterra, \
                           ricker, daycare, lorenz, ar1, mg1, toad, \
-                          stochastic_volatility_model
+                          scratch_assay, stochastic_volatility_model
 
 
 def test_bdm():
@@ -119,16 +119,24 @@ def test_mg1():
 
 
 def test_toad():
-    m = toad.get_model(parallelise=False)
+    m = toad.get_model()
     rej = elfi.Rejection(m['d'], batch_size=10)
     rej.sample(10, quantile=0.5)
 
 
 def test_stochastic_volatility_model():
     m = stochastic_volatility_model.get_model()
+    rej = elfi.Rejection(m['d'], batch_size=10)
+    rej.sample(10, quantile=0.5)
 
 
 def test_arch():
     m = arch.get_model()
+    rej = elfi.Rejection(m['d'], batch_size=10)
+    rej.sample(10, quantile=0.5)
+
+
+def test_scratch_assay():
+    m = scratch_assay.get_model()
     rej = elfi.Rejection(m['d'], batch_size=10)
     rej.sample(10, quantile=0.5)

@@ -7,30 +7,27 @@ import logging
 import numpy as np
 
 import elfi.methods.mcmc as mcmc
-from elfi.classifiers.classifier import Classifier, LogisticRegression
 from elfi.loader import get_sub_seed
 from elfi.methods.bo.acquisition import LCBSC, AcquisitionBase
 from elfi.methods.bo.gpy_regression import GPyRegression
 from elfi.methods.bo.utils import CostFunction
-from elfi.methods.inference.parameter_inference import ParameterInference
+from elfi.methods.classifier import Classifier, LogisticRegression
+from elfi.methods.inference.parameter_inference import ModelBased
 from elfi.methods.posteriors import BOLFIREPosterior
 from elfi.methods.results import BOLFIRESample
 from elfi.methods.utils import arr2d_to_batch, batch_to_arr2d, resolve_sigmas
-from elfi.model.elfi_model import ElfiModel, ObservableMixin, Summary
 from elfi.model.extensions import ModelPrior
 
 logger = logging.getLogger(__name__)
 
 
-class BOLFIRE(ParameterInference):
+class BOLFIRE(ModelBased):
     """Bayesian Optimization and Classification in Likelihood-Free Inference (BOLFIRE)."""
 
     def __init__(self,
                  model,
                  n_training_data,
                  feature_names=None,
-                 marginal=None,
-                 seed_marginal=None,
                  classifier=None,
                  bounds=None,
                  n_initial_evidence=0,
@@ -39,7 +36,8 @@ class BOLFIRE(ParameterInference):
                  update_interval=1,
                  target_model=None,
                  acquisition_method=None,
-                 *args, **kwargs):
+                 batch_size=None,
+                 **kwargs):
         """Initialize the BOLFIRE method.
 
         Parameters
@@ -50,10 +48,6 @@ class BOLFIRE(ParameterInference):
             Size of training data.
         feature_names: str or list, optional
             ElfiModel nodes used as features in classification. Default all Summary nodes.
-        marginal: np.ndnarray, optional
-            Marginal data.
-        seed_marginal: int, optional
-            Seed for marginal data generation.
         classifier: str, optional
             Classifier to be used. Default LogisticRegression.
         bounds: dict, optional
@@ -62,12 +56,12 @@ class BOLFIRE(ParameterInference):
             custom target_model is given.
         n_initial_evidence: int, optional
             Number of initial evidence.
-        acq_noise_var : float or dict, optional
+        acq_noise_var: float or dict, optional
             Variance(s) of the noise added in the default LCBSC acquisition method.
             If a dictionary, values should be float specifying the variance for each dimension.
         exploration_rate: float, optional
             Exploration rate of the acquisition method.
-        update_interval : int, optional
+        update_interval: int, optional
             How often to update the GP hyperparameters of the target_model.
         target_model: GPyRegression, optional
             A surrogate model to be used.
@@ -75,17 +69,15 @@ class BOLFIRE(ParameterInference):
             Method of acquiring evidence points. Default LCBSC.
 
         """
-        # Resolve model and initialize
-        model = self._resolve_model(model)
-        super(BOLFIRE, self).__init__(model, output_names=None, *args, **kwargs)
+        batch_size = batch_size or 2 * np.min(n_training_data)
+        assert batch_size % 2 == 0
+        n_train = n_training_data if isinstance(n_training_data, int) else n_training_data[0]
+        super(BOLFIRE, self).__init__(model, 2 * n_train, feature_names=feature_names,
+                                      batch_size=batch_size, **kwargs)
+        self._random_state = np.random.RandomState(self.seed)
 
-        # Initialize attributes
-        n_sim_round = self._resolve_n_training_data(n_training_data)
-        self.n_training_data = n_sim_round if isinstance(n_sim_round, int) else n_sim_round[0]
-        self.feature_names = self._resolve_feature_names(self.model, feature_names)
-        self.marginal = self._resolve_marginal(marginal, seed_marginal)
+        # Initialize classifier attributes
         self.classifier = self._resolve_classifier(classifier)
-        self.observed = self._get_observed_feature_values(self.model, self.feature_names)
 
         # TODO: write resolvers for the attributes below
         self.bounds = bounds
@@ -95,24 +87,21 @@ class BOLFIRE(ParameterInference):
 
         # Initialize GP regression
         self.target_model = self._resolve_target_model(target_model)
-        self.prior = ModelPrior(self.model, parameter_names=self.target_model.parameter_names)
-
-        # Define acquisition cost
-        self.cost = CostFunction(self.prior.logpdf, self.prior.gradient_logpdf, scale=-1)
+        self.prior = ModelPrior(self.model, parameter_names=self.parameter_names)
 
         # Initialize BO
         self.n_initial_evidence = self._resolve_n_initial_evidence(n_initial_evidence)
         self.acquisition_method = self._resolve_acquisition_method(acquisition_method)
 
         # Adaptive simulation count
-        self.is_multi = isinstance(n_sim_round, list)
-        self._index = 0
+        self.is_multi = isinstance(n_training_data, list)
+        self.current_index = 0
         if self.is_multi:
-            self.n_batches_round = [int(n_sim/self.batch_size) for n_sim in n_sim_round]
+            self.n_batches_round = [int(2 * n_train/self.batch_size) for n_train in n_training_data]
             assert np.all(np.array(self.n_batches_round) >= 1)
             assert np.all(np.array(self.n_batches_round) <= self.n_batches_round[0])
         else:
-            self.n_batches_round = [int(self.n_training_data/self.batch_size)]
+            self.n_batches_round = [int(2 * n_training_data/self.batch_size)]
 
         # Initialize state dictionary
         self.state['n_evidence'] = 0
@@ -122,9 +111,12 @@ class BOLFIRE(ParameterInference):
         self.classifier_attributes = []
 
         # Initialize data collection
-        self._likelihood = np.zeros((self.n_training_data, self.marginal.shape[1]))
-        self._random_state = np.random.RandomState(self.seed)
         self._init_round()
+
+    @property
+    def parameter_names(self):
+        """Return the parameters to be inferred."""
+        return self.target_model.parameter_names
 
     @property
     def n_evidence(self):
@@ -134,54 +126,33 @@ class BOLFIRE(ParameterInference):
     @property
     def finished(self):
         """Check whether objective has been reached."""
-        evidence_reached = self.objective['n_evidence'] <= self.state['n_evidence']
+        round_reached = self.objective['round'] <= self.state['round']
         batches_reached = self.objective['n_batches'] <= self.state['n_batches']
-        return evidence_reached or batches_reached
+        return round_reached or batches_reached
 
-    def set_objective(self, n_evidence, n_sim=None):
-        """Set an objective for inference. You can continue BO by giving a larger n_evidence.
+    def set_objective(self, rounds, n_sim=None):
+        """Set an objective for inference.
 
         Parameters
         ----------
-        n_evidence: int
-            Number of total evidence for the GP fitting. This includes any initial evidence.
+        rounds: int
+            Number of data collection rounds.
         n_sim: int, optional
-            Number of simulations. Inference stops when either n_evidence or n_sim is reached.
+            Number of simulations. Inference stops when either rounds or n_sim is reached.
 
         """
-        if n_evidence < self.n_evidence:
-            logger.warning('Requesting less evidence than there already exists.')
-        self.objective['n_evidence'] = n_evidence
+        self.objective['round'] = rounds
         if n_sim is None:
-            self.objective['n_batches'] = n_evidence * int(self.n_training_data / self.batch_size)
+            self.objective['n_batches'] = rounds * int(self.n_sim_round / self.batch_size)
         else:
             self.objective['n_batches'] = int(n_sim / self.batch_size)
 
     def extract_result(self):
         """Extract the results from the current state."""
-        return BOLFIREPosterior(self.target_model.parameter_names,
+        return BOLFIREPosterior(self.parameter_names,
                                 self.target_model,
                                 self.prior,
                                 self.classifier_attributes)
-
-    def update(self, batch, batch_index):
-        """Update the GP regression model of the target node with a new batch.
-
-        Parameters
-        ----------
-        batch : dict
-            dict with `self.outputs` as keys and the corresponding outputs for the batch
-            as values
-        batch_index : int
-            Index of batch.
-
-        """
-        super(BOLFIRE, self).update(batch, batch_index)
-
-        self._merge_batch(batch)
-        if self.state['n_batches_round'] == self.n_batches_round[self._index]:
-            self._update_logratio_model()
-            self._init_round()
 
     def prepare_new_batch(self, batch_index):
         """Prepare values for a new batch.
@@ -195,9 +166,12 @@ class BOLFIRE(ParameterInference):
         batch: dict
 
         """
-        batch_parameters = np.repeat(self._params, self.batch_size, axis=0)
-        return arr2d_to_batch(batch_parameters, self.target_model.parameter_names)
-
+        params = np.atleast_2d(self.current_params)
+        params_1 = np.repeat(params, int(self.batch_size/2), axis=0)
+        params_0 = self.prior.rvs(int(self.batch_size/2), random_state=self._random_state)
+        batch_params = np.vstack((params_1, params_0))
+        return arr2d_to_batch(batch_params, self.parameter_names)
+        
     def predict_log_ratio(self, X, y, X_obs):
         """Predict the log-ratio, i.e, logarithm of likelihood / marginal.
 
@@ -240,6 +214,8 @@ class BOLFIRE(ParameterInference):
         """
         logger.info('BOLFIRE: Fitting the surrogate model...')
         if isinstance(n_evidence, int) and n_evidence > 0:
+            if n_evidence < self.n_evidence:
+                logger.warning('Requesting less evidence than there already exists.')
             return self.infer(n_evidence, n_sim=n_sim, bar=bar)
         raise TypeError('n_evidence must be a positive integer.')
 
@@ -289,7 +265,7 @@ class BOLFIRE(ParameterInference):
 
         # Check standard deviations of Gaussian proposals when using Metropolis-Hastings
         if algorithm == 'metropolis':
-            sigma_proposals = resolve_sigmas(self.target_model.parameter_names,
+            sigma_proposals = resolve_sigmas(self.parameter_names,
                                              sigma_proposals,
                                              self.target_model.bounds)
 
@@ -351,7 +327,7 @@ class BOLFIRE(ParameterInference):
 
         logger.info(f'{n_chains} chains of {n_samples} iterations acquired. '
                     'Effective sample size and Rhat for each parameter:')
-        for ii, node in enumerate(self.target_model.parameter_names):
+        for ii, node in enumerate(self.parameter_names):
             logger.info(f'{node} {mcmc.eff_sample_size(chains[:, :, ii])} '
                         f'{mcmc.gelman_rubin_statistic(chains[:, :, ii])}')
 
@@ -359,71 +335,11 @@ class BOLFIRE(ParameterInference):
 
         return BOLFIRESample(method_name='BOLFIRE',
                              chains=chains,
-                             parameter_names=self.target_model.parameter_names,
+                             parameter_names=self.parameter_names,
                              warmup=warmup,
                              n_sim=self.state['n_sim'],
                              seed=self.seed,
                              *args, **kwargs)
-
-    def _resolve_model(self, model):
-        """Resolve a given elfi model."""
-        if not isinstance(model, ElfiModel):
-            raise ValueError('model must be an ElfiModel.')
-        return model
-
-    def _resolve_n_training_data(self, n_training_data):
-        """Resolve the size of training data to be used."""
-        if isinstance(n_training_data, int) and n_training_data > 0:
-            if n_training_data % self.batch_size == 0:
-                return n_training_data
-            raise ValueError('n_training_data must be a multiple of batch_size.')
-        if isinstance(n_training_data, list):
-            return [self._resolve_n_training_data(n) for n in n_training_data]
-        raise TypeError('n_training_data must be a positive int or list.')
-
-    def _resolve_feature_names(self, model, feature_names):
-        """Resolve feature names to be used."""
-        if feature_names is None:
-            feature_names = self._get_summary_names(model)
-            if len(feature_names) == 0:
-                raise NotImplementedError('Could not resolve feature_names based on the model.')
-            logger.info('Using all summary statistics as features in classification.')
-            return feature_names
-        if isinstance(feature_names, str):
-            feature_names = [feature_names]
-        if isinstance(feature_names, list):
-            if len(feature_names) == 0:
-                raise ValueError('feature_names must include at least one item.')
-            for feature_name in feature_names:
-                if feature_name not in model.nodes:
-                    raise ValueError(f'Node \'{feature_name}\' not found in the model.')
-                if not isinstance(model[feature_name], ObservableMixin):
-                    raise TypeError(f'Node \'{feature_name}\' is not observable.')
-            return feature_names
-        raise TypeError('feature_names must be a string or a list of strings.')
-
-    def _get_summary_names(self, model):
-        """Return the names of summary statistics."""
-        return [node for node in model.nodes if isinstance(model[node], Summary)
-                and not node.startswith('_')]
-
-    def _resolve_marginal(self, marginal, seed_marginal=None):
-        """Resolve marginal data."""
-        if marginal is None:
-            marginal = self._generate_marginal(seed_marginal)
-            x, y = marginal.shape
-            logger.info(f'New marginal data ({x} x {y}) are generated.')
-            return marginal
-        if isinstance(marginal, np.ndarray) and len(marginal.shape) == 2:
-            return marginal
-        raise TypeError('marginal must be 2d numpy array.')
-
-    def _generate_marginal(self, seed_marginal=None):
-        """Generate marginal data."""
-        batch = self.model.generate(self.n_training_data,
-                                    outputs=self.feature_names,
-                                    seed=seed_marginal)
-        return batch_to_arr2d(batch, self.feature_names)
 
     def _resolve_classifier(self, classifier):
         """Resolve classifier."""
@@ -432,10 +348,6 @@ class BOLFIRE(ParameterInference):
         if isinstance(classifier, Classifier):
             return classifier
         raise ValueError('classifier must be an instance of Classifier.')
-
-    def _get_observed_feature_values(self, model, feature_names):
-        """Return observed feature values."""
-        return np.column_stack([model[feature_name].observed for feature_name in feature_names])
 
     def _resolve_n_initial_evidence(self, n_initial_evidence):
         """Resolve number of initial evidence."""
@@ -454,34 +366,51 @@ class BOLFIRE(ParameterInference):
     def _resolve_acquisition_method(self, acquisition_method):
         """Resolve acquisition method."""
         if acquisition_method is None:
+            # Model prior log-probabilities as an additive cost
+            cost = CostFunction(self.prior.logpdf, self.prior.gradient_logpdf, scale=-1)
             return LCBSC(model=self.target_model,
                          prior=self.prior,
                          noise_var=self.acq_noise_var,
                          exploration_rate=self.exploration_rate,
                          seed=self.seed,
-                         additive_cost=self.cost)
+                         additive_cost=cost)
         if isinstance(acquisition_method, AcquisitionBase):
             return acquisition_method
         raise TypeError('acquisition_method must be an instance of AcquisitionBase.')
 
+    @property
+    def current_params(self):
+        """Return parameter values explored in the current round."""
+        return self._current_params
+
+    @current_params.setter
+    def current_params(self, params):
+        """Set parameter values explored in the current round."""
+        self._current_params = params
+
     def _init_round(self):
-        """Initialize data collection round."""
-        self.state['n_batches_round'] = 0
+        """Initialise a new data collection round.
+
+        BOLFIRE uses an acquisition method to choose parameter values.
+
+        """
+        self.state['n_sim_round'] = 0
 
         # Set new parameter values
         if self.n_evidence < self.n_initial_evidence:
             # Sample parameter values from the model priors
-            self._params = self.prior.rvs(1, random_state=self._random_state)
+            self.current_params = self.prior.rvs(1, random_state=self._random_state)
         else:
             # Acquire parameter values from the acquisition function
             t = self.n_evidence - self.n_initial_evidence
             if self.is_multi:
-                self._params, self._index = self.acquisition_method.acquire(1, t)
+                self.current_params, self.current_index = self.acquisition_method.acquire(1, t)
+                self.n_sim_round = self.n_batches_round[self.current_index] * self.batch_size
             else:
-                self._params = self.acquisition_method.acquire(1, t)
+                self.current_params = self.acquisition_method.acquire(1, t)
 
         # Maximum batch index that can be prepared
-        self.batch_index_max = self.state['n_batches'] + self.n_batches_round[self._index]
+        self.batch_index_max = self.state['n_batches'] + self.n_batches_round[self.current_index]
 
     def _allow_submit(self, batch_index):
         """Check whether batch_index can be prepared."""
@@ -491,54 +420,50 @@ class BOLFIRE(ParameterInference):
         else:
             return super(BOLFIRE, self)._allow_submit(batch_index)
 
-    def _merge_batch(self, batch):
-        """Add batch to collected data."""
-        data = batch_to_arr2d(batch, self.feature_names)
-        n_sim = int(self.state['n_batches_round'] * self.batch_size)
-        self._likelihood[n_sim:n_sim + self.batch_size] = data
-        self.state['n_batches_round'] += 1
+    def _process_simulated(self):
+        """Process the simulated data.
 
-    def _update_logratio_model(self):
-        """Calculate log-ratio based on collected data and update surrogate model."""
-        n_training_data = int(self.n_batches_round[self._index] * self.batch_size)
-        inds = self._random_state.permutation(np.arange(self.marginal.shape[0]))
-        marginal = self.marginal[inds[:n_training_data]]
-        likelihood = self._likelihood[:n_training_data]
+        BOLFIRE uses the simulated data to calculate log-ratio estimates and update the
+        surrogate model.
 
+        """
         if self.is_multi and self.n_evidence < self.n_initial_evidence:
             # Predict log-ratio at all fidelities
             negative_log_ratio_value = np.zeros(len(self.n_batches_round))
             for index, n_batches in enumerate(self.n_batches_round):
-                n_sim = int(n_batches * self.batch_size)
-                X, y = self._generate_training_data(likelihood[:n_sim], marginal[:n_sim])
+                X, y = self._generate_training_data(n_batches)
                 negative_log_ratio_value[index] = -1 * self.predict_log_ratio(X, y, self.observed)
                 self.classifier_attributes += [self.classifier.attributes]
         else:
             # Predict log-ratio
-            X, y = self._generate_training_data(likelihood, marginal)
+            X, y = self._generate_training_data(self.n_batches_round[self.current_index])
             negative_log_ratio_value = -1 * self.predict_log_ratio(X, y, self.observed)
             self.classifier_attributes += [self.classifier.attributes]
 
         # BO part
+
+        self.state['n_evidence'] += 1
         optimize = self._should_optimize()
+        parameter_values = self.current_params
         if self.is_multi:
-            if self.n_evidence < self.n_initial_evidence:
-                params = np.repeat(self._params, len(self.n_batches_round), axis=0)
+            if self.n_evidence <= self.n_initial_evidence:
+                params = np.repeat(parameter_values, len(self.n_batches_round), axis=0)
                 inds = np.arange(len(self.n_batches_round))
             else:
-                params = self._params
-                inds = self._index
+                params = parameter_values
+                inds = np.array([self.current_index])
             self.target_model.update(params, negative_log_ratio_value, inds, optimize)
         else:
-            self.target_model.update(self._params, negative_log_ratio_value, optimize)
-        self.state['n_evidence'] += 1
+            self.target_model.update(parameter_values, negative_log_ratio_value, optimize)
         if optimize:
             self.state['last_GP_update'] = self.state['n_evidence']
 
-    def _generate_training_data(self, likelihood, marginal):
+    def _generate_training_data(self, n_batches):
         """Generate training data."""
-        X = np.vstack((likelihood, marginal))
-        y = np.concatenate((np.ones(likelihood.shape[0]), -1 * np.ones(marginal.shape[0])))
+        n_training_data = int(n_batches * self.batch_size)
+        X = self.simulated[:n_training_data]
+        y = np.concatenate((np.ones(int(self.batch_size/2)), -1 * np.ones(int(self.batch_size/2))))
+        y = np.tile(y, n_batches)
         return X, y
 
     def _should_optimize(self):

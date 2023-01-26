@@ -1,8 +1,32 @@
 Changelog
 =========
 
+- Fix the option to continue inference in model-based inference
+- Move classifiers
+- Fix readthedocs configuration
+- Update penalty to shrinkage parameter conversion in synthetic likelihood calculation
+- Update BSL pre sample methods
+- Update BslSample
+- Move ROMC tests
+- Update to numpy 1.24
+- Update readthedocs configuration
+- Restrict numpy < 1.24 until codebase has been updated
+- Update documentation-related files: docs, conf.py and requirements-dev.txt 
+- Update PULL_REQUEST_TEMPLATE.md
+- Drop tests for py36 and add tests for py39 and py310
+- Fix couple of minor bugs in `ar1`-model
+- Update parent class in BOLFIRE
+- Fix semiparametric synthetic likelihood with glasso/warton and add tests
+- Fix plot marginals and remove plot summaries
+- Fix stochastic volatility example
+- Improve batch simulations in toad example
+- Remove synthetic likelihood node and update BSL data collection
+- Fix M/G/1 example
+- Fix scratch assay example
+- Add scratch assay example
 - Add GP classifier for ratio estimation
 - Fix multidimensional indexing in daycare example
+- Add BSL method
 
 0.8.4 (2021-06-13)
 ------------------
