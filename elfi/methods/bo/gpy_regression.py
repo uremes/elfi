@@ -23,6 +23,8 @@ class GPyRegression:
                  bounds=None,
                  optimizer="scg",
                  max_opt_iters=50,
+                 ignore_failed=False,
+                 classifier=None,
                  gp=None,
                  **gp_params):
         """Initialize GPyRegression.
@@ -87,6 +89,14 @@ class GPyRegression:
         self._rbf_is_cached = False
         self.is_sampling = False  # set to True once in sampling phase
 
+
+        self.ignore_failed = ignore_failed
+        self.X_all = np.zeros((0, self.input_dim))
+        self.Y_all = np.zeros((0, 1))
+        self.label = np.zeros((0, 1))
+        self._clf = classifier
+        self.failed_output = np.inf
+
     def __str__(self):
         """Return GPy's __str__."""
         return self._gp.__str__()
@@ -142,9 +152,17 @@ class GPyRegression:
             self._rbf_is_cached = False  # in case one resumes fitting the GP after sampling
 
         if noiseless:
-            return self._gp.predict_noiseless(x)
+            pred = self._gp.predict_noiseless(x)
         else:
-            return self._gp.predict(x)
+            pred = self._gp.predict(x)
+
+        if self._clf is not None and np.sum(self.label) < len(self.label):
+            mask = self._clf.predict(x)
+            pred[0][mask < 1] = self.failed_output  # means
+            pred[1][mask < 1] = 0  # variances
+
+        return pred
+
 
     # TODO: find a more general solution
     # cache some RBF-kernel-specific values for faster sampling
@@ -219,6 +237,11 @@ class GPyRegression:
         else:
             grad_mu, grad_var = self._gp.predictive_gradients(x)
             grad_mu = grad_mu[:, :, 0]  # Assume 1D output (distance in ABC)
+
+        if self._clf is not None and np.sum(self.label) < len(self.label):
+            mask = self._clf.predict(x)
+            grad_mu[mask < 1] = 0
+            grad_var[mask < 1] = 0
 
         return grad_mu, grad_var
 
@@ -298,7 +321,21 @@ class GPyRegression:
         x = x.reshape((-1, self.input_dim))
         y = y.reshape((-1, 1))
 
+        # Track and remove failed simulations
+        if self.ignore_failed:
+            self.X_all = np.r_[self.X_all, x]
+            self.Y_all = np.r_[self.Y_all, y]
+            mask = np.isfinite(y)
+            self.label = np.r_[self.label, mask.astype(int)]
+            y = y[mask.reshape(-1)]
+            x = x[mask.reshape(-1)]
+            # Update classifier model
+            if self._clf is not None and np.sum(self.label) < len(self.label):
+                self._clf.fit(self.X_all, self.label.squeeze())
+
         if self._gp is None:
+            if len(y) < 1:
+                raise RuntimeError("No finite values available for model initialisation.")
             self._init_gp(x, y)
         else:
             # Reconstruct with new data
