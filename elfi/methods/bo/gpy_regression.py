@@ -156,7 +156,7 @@ class GPyRegression:
         else:
             pred = self._gp.predict(x)
 
-        if self._clf is not None and np.sum(self.label) < len(self.label):
+        if self._clf is not None and len(np.unique(self.label)) > 1:
             mask = self._clf.predict(x)
             pred[0][mask < 1] = self.failed_output  # means
             pred[1][mask < 1] = 0  # variances
@@ -238,7 +238,7 @@ class GPyRegression:
             grad_mu, grad_var = self._gp.predictive_gradients(x)
             grad_mu = grad_mu[:, :, 0]  # Assume 1D output (distance in ABC)
 
-        if self._clf is not None and np.sum(self.label) < len(self.label):
+        if self._clf is not None and len(np.unique(self.label)) > 1:
             mask = self._clf.predict(x)
             grad_mu[mask < 1] = 0
             grad_var[mask < 1] = 0
@@ -323,15 +323,17 @@ class GPyRegression:
 
         # Track and remove failed simulations
         if self.ignore_failed:
+            # Track failed
             self.X_all = np.r_[self.X_all, x]
             self.Y_all = np.r_[self.Y_all, y]
             mask = np.isfinite(y)
             self.label = np.r_[self.label, mask.astype(int)]
+            # Update classifier model
+            if self._clf is not None and len(np.unique(self.label)) > 1:
+                self._clf.fit(self.X_all, self.label)
+            # Remove failed
             y = y[mask.reshape(-1)]
             x = x[mask.reshape(-1)]
-            # Update classifier model
-            if self._clf is not None and np.sum(self.label) < len(self.label):
-                self._clf.fit(self.X_all, self.label.squeeze())
 
         if self._gp is None:
             if len(y) < 1:
@@ -403,3 +405,95 @@ class GPyRegression:
     def __copy__(self):
         """Return a copy of current instance."""
         return self.copy()
+
+
+class GPyClassifier:
+
+    def __init__(self, kernel=None, mean_function=None):
+        """Initialize the Gaussian process classifier.
+
+        Parameters
+        ----------
+        kernel : GPy.kern, optional
+            Kernel function, defaults to RBF.
+        mean_function : GPy.core.Mapping, optional
+            Mean function, defaults to zero.
+
+        """
+        self.kernel = kernel or RBF(input_dim, ARD=True)
+        self.mean_function = mean_function
+        self.model = None
+        self.last_optim = 0
+
+    def fit(self, x, y):
+        """Fit the Gaussian process classifier.
+
+        Parameters
+        ----------
+        x: np.ndarray (n_samples, n_features)
+            Feature vectors of data.
+        y: np.ndarray (n_samples, )
+            Target values, must be binary.
+
+        """
+        self.model = self._initialize_model(x, y.reshape(-1, 1))
+        self.model.optimize()
+        self.last_optim = self.n_evidence
+
+    def update(self, x, y, optimize=False):
+        """Update the Gaussian process classifier.
+
+        Parameters
+        ----------
+        X: np.ndarray (n_samples, n_features)
+            Feature vectors of data.
+        y: np.ndarray (n_samples, 1)
+            Target values, must be binary.
+        optimize : bool, optional
+            Whether to optimize hyperparameters.
+
+        """
+        if self.model is None:
+            self.model = self._initialize_model(x, y)
+        else:
+            x = np.r_[self.model.X, x]
+            y = np.r_[self.model.Y, y]
+            self.model.set_XY(x, y)
+        if optimize:
+            self.model.optimize()
+            self.last_optim = self.n_evidence
+
+    def predict(self, X):
+        """Predict class labels.
+
+        Parameters
+        ----------
+        X: np.ndarray (n_samples, n_features)
+            Feature vectors of data.
+
+        Returns
+        -------
+        np.ndarray
+
+        """
+        return (self.model.predict(X)[0] > 0.5).reshape(-1).astype(int)
+
+    def _initialize_model(self, x, y):
+        """Initialize the Gaussian process classifier."""
+        kernel = self.kernel.copy()
+        mean_function = self.mean_function.copy() if self.mean_function else None
+        return GPy.models.GPClassification(x, y, kernel=kernel, mean_function=mean_function)
+
+    @property
+    def X(self):
+        return self.model.X
+
+    @property
+    def Y(self):
+        return self.model.Y
+
+    @property
+    def n_evidence(self):
+        if self.model is None:
+            return 0
+        return self.model.num_data
