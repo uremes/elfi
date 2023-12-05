@@ -409,7 +409,7 @@ class GPyRegression:
 
 class GPyClassifier:
 
-    def __init__(self, kernel=None, mean_function=None):
+    def __init__(self, kernel=None, mean_function=None, thd=0.5):
         """Initialize the Gaussian process classifier.
 
         Parameters
@@ -423,6 +423,7 @@ class GPyClassifier:
         self.kernel = kernel or RBF(input_dim, ARD=True)
         self.mean_function = mean_function
         self.model = None
+        self.thd = thd
         self.last_optim = 0
 
     def fit(self, x, y):
@@ -463,7 +464,7 @@ class GPyClassifier:
             self.model.optimize()
             self.last_optim = self.n_evidence
 
-    def predict(self, X):
+    def predict(self, X, thd=None):
         """Predict class labels.
 
         Parameters
@@ -476,7 +477,8 @@ class GPyClassifier:
         np.ndarray
 
         """
-        return (self.model.predict(X)[0] > 0.5).reshape(-1).astype(int)
+        thd = thd or self.thd
+        return (self.model.predict(X)[0] > thd).reshape(-1).astype(int)
 
     def _initialize_model(self, x, y):
         """Initialize the Gaussian process classifier."""
