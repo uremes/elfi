@@ -43,7 +43,7 @@ class GPyRegression:
             Alternatives: "scg", "fmin_tnc", "simplex", "lbfgsb", "lbfgs", "sgd"
             See also: paramz.Model.optimize()
         max_opt_iters : int, optional
-        gp : GPy.model.GPRegression instance, optional
+        gp : GPy.models.GPRegression instance, optional
         **gp_params
             kernel : GPy.Kern
             noise_var : float
@@ -88,7 +88,6 @@ class GPyRegression:
 
         self._rbf_is_cached = False
         self.is_sampling = False  # set to True once in sampling phase
-
 
         self.ignore_failed = ignore_failed
         self.X_all = np.zeros((0, self.input_dim))
@@ -162,7 +161,6 @@ class GPyRegression:
             pred[1][mask < 1] = 0  # variances
 
         return pred
-
 
     # TODO: find a more general solution
     # cache some RBF-kernel-specific values for faster sampling
@@ -405,6 +403,197 @@ class GPyRegression:
     def __copy__(self):
         """Return a copy of current instance."""
         return self.copy()
+
+
+class RobustGPyRegression(GPyRegression):
+    """Robust Gaussian Process regression using the GPy library.
+
+    Uses a classifier to handle observed data with infinite output values.
+    """
+
+    def __init__(self,
+                 parameter_names=None,
+                 bounds=None,
+                 thd=0,
+                 clf=None,
+                 clf_kernel=None,
+                 **kwargs):
+        """Initialize RobustGPyRegression.
+
+        Parameters
+        ----------
+        parameter_names : list of str, optional
+            Names of parameter nodes. If None, sets dimension to 1.
+        bounds : dict, optional
+            The region where to estimate the posterior for each parameter in
+            model.parameters.
+            `{'parameter_name':(lower, upper), ... }`
+            If not supplied, defaults to (0, 1) bounds for all dimensions.
+        thd : float, optional
+            Threshold value to exclude inputs that return infinite output values.
+        clf: GPy.models.GPClassification instance, optional
+            Differentiates between inputs that return finite (1) and infinite (0) outputs.
+        clf_kernel : GPy.Kern, optional
+            Kernel function, defaults to RBF.
+        **kwargs: see GPyRegression
+
+        """
+        super().__init__(parameter_names, bounds, **kwargs)
+
+        self.thd = thd
+        self._X = np.zeros((0, self.input_dim))
+        self._Y = np.zeros((0, 1))
+
+        self._clf = clf
+        self._clf_kernel = clf_kernel or GPy.kern.RBF(self.input_dim, ARD=True)
+
+        self.FAILED_OUTPUT = np.inf
+
+    def predict(self, x, **kwargs):
+        """Return predicted mean and variance at x.
+
+        Parameters
+        ----------
+        x : np.array
+            numpy compatible (n, input_dim) array of points to evaluate
+            if len(x.shape) == 1 will be cast to 2D with x[None, :]
+
+        Returns
+        -------
+        tuple
+            GP (mean, var) at x where
+                mean : np.array
+                    with shape (x.shape[0], 1)
+                var : np.array
+                    with shape (x.shape[0], 1)
+
+        """
+        # Ensure it's 2d for GPy
+        x = np.asanyarray(x).reshape((-1, self.input_dim))
+        mean, var = super().predict(x)
+
+        # Predict failures
+        if self._clf is not None:
+            mask = (self._clf.predict(x)[0] < self.thd).reshape(-1)
+            mean[mask] = self.FAILED_OUTPUT
+            var[mask] = 0
+
+        return mean, var
+
+    def predictive_gradients(self, x):
+        """Return the gradients of predicted mean and variance at x.
+
+        Parameters
+        ----------
+        x : np.array
+            numpy compatible (n, input_dim) array of points to evaluate
+            if len(x.shape) == 1 will be cast to 2D with x[None, :]
+
+        Returns
+        -------
+        tuple
+            GP (grad_mean, grad_var) at x where
+                grad_mean : np.array
+                    with shape (x.shape[0], input_dim)
+                grad_var : np.array
+                    with shape (x.shape[0], input_dim)
+
+        """
+        # Ensure it's 2d for GPy
+        x = np.asanyarray(x).reshape((-1, self.input_dim))
+        grad_mean, grad_var = super().predictive_gradients(x)
+
+        # Predict failures
+        if self._clf is not None:
+            mask = (self._clf.predict(x)[0] < self.thd).reshape(-1)
+            grad_mean[mask] = 0
+            grad_var[mask] = 0
+
+        return grad_mean, grad_var
+
+    def _make_classifier_instance(self, x, y, kernel):
+        return GPy.models.GPClassification(x, y, kernel=kernel)
+
+    def update(self, x, y, optimize=False):
+        """Update the surrogate model with new data.
+
+        Parameters
+        ----------
+        x : np.array
+        y : np.array
+        optimize : bool, optional
+            Whether to optimize hyperparameters.
+
+        """
+        # Must cast these as 2d for GPy
+        x = x.reshape((-1, self.input_dim))
+        y = y.reshape((-1, 1))
+
+        self._X = np.r_[self._X, x]
+        self._Y = np.r_[self._Y, y]
+
+        # Update regression model without failed simulations
+        mask = np.isfinite(y).reshape(-1)
+        if mask.any():
+            super().update(x[mask], y[mask], optimize=False)
+        elif self._gp is None:
+            raise RuntimeError("No finite outputs available for model initialisation.")
+
+        # Update classification model
+        if self.thd > 0:
+            labels = np.isfinite(self._Y).astype(int)
+            if self._clf is not None:
+                # Reconstruct with new data
+                self._clf = self._make_classifier_instance(self.X, labels, self._clf.kern.copy())
+            elif not mask.all():
+                # Initialise
+                self._clf = self._make_classifier_instance(self.X, labels, self._clf_kernel)
+
+        if optimize:
+            self.optimize()
+
+    def optimize(self):
+        """Optimize GP hyperparameters."""
+        super().optimize()
+        if self._clf is not None:
+            try:
+                self._clf.optimize(self.optimizer, max_iters=self.max_opt_iters)
+            except np.linalg.linalg.LinAlgError:
+                logger.warning("Numerical error in GP optimization. Stopping optimization")
+
+    @property
+    def n_evidence(self):
+        """Return the number of observed samples."""
+        return len(self._Y)
+
+    @property
+    def X(self):
+        """Return input evidence."""
+        return self._X
+
+    @property
+    def Y(self):
+        """Return output evidence."""
+        return self._Y
+
+    @property
+    def classifier_instance(self):
+        """Return the classifier instance."""
+        return self._clf
+
+    def copy(self):
+        """Return a copy of current instance."""
+        kopy = super().copy()
+
+        if self._clf:
+            x = self._clf.X.copy()
+            y = self._clf.Y.copy()
+            kopy._clf = self._make_classifier_instance(x, y, self._clf.kern.copy())
+
+        if self._clf_kernel:
+            kopy._clf_kernel = self._clf_kernel.copy()
+
+        return kopy
 
 
 class GPyClassifier:
