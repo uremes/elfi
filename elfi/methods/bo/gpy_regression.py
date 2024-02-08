@@ -23,8 +23,6 @@ class GPyRegression:
                  bounds=None,
                  optimizer="scg",
                  max_opt_iters=50,
-                 ignore_failed=False,
-                 classifier=None,
                  gp=None,
                  **gp_params):
         """Initialize GPyRegression.
@@ -85,16 +83,10 @@ class GPyRegression:
         self.max_opt_iters = max_opt_iters
 
         self._gp = gp
+        self._gp_hyperparams = {}
 
         self._rbf_is_cached = False
         self.is_sampling = False  # set to True once in sampling phase
-
-        self.ignore_failed = ignore_failed
-        self.X_all = np.zeros((0, self.input_dim))
-        self.Y_all = np.zeros((0, 1))
-        self.label = np.zeros((0, 1))
-        self._clf = classifier
-        self.failed_output = np.inf
 
     def __str__(self):
         """Return GPy's __str__."""
@@ -154,11 +146,6 @@ class GPyRegression:
             pred = self._gp.predict_noiseless(x)
         else:
             pred = self._gp.predict(x)
-
-        if self._clf is not None and len(np.unique(self.label)) > 1:
-            mask = self._clf.predict(x)
-            pred[0][mask < 1] = self.failed_output  # means
-            pred[1][mask < 1] = 0  # variances
 
         return pred
 
@@ -235,11 +222,6 @@ class GPyRegression:
         else:
             grad_mu, grad_var = self._gp.predictive_gradients(x)
             grad_mu = grad_mu[:, :, 0]  # Assume 1D output (distance in ABC)
-
-        if self._clf is not None and len(np.unique(self.label)) > 1:
-            mask = self._clf.predict(x)
-            grad_mu[mask < 1] = 0
-            grad_var[mask < 1] = 0
 
         return grad_mu, grad_var
 
@@ -319,23 +301,7 @@ class GPyRegression:
         x = x.reshape((-1, self.input_dim))
         y = y.reshape((-1, 1))
 
-        # Track and remove failed simulations
-        if self.ignore_failed:
-            # Track failed
-            self.X_all = np.r_[self.X_all, x]
-            self.Y_all = np.r_[self.Y_all, y]
-            mask = np.isfinite(y)
-            self.label = np.r_[self.label, mask.astype(int)]
-            # Update classifier model
-            if self._clf is not None and len(np.unique(self.label)) > 1:
-                self._clf.fit(self.X_all, self.label)
-            # Remove failed
-            y = y[mask.reshape(-1)]
-            x = x[mask.reshape(-1)]
-
         if self._gp is None:
-            if len(y) < 1:
-                raise RuntimeError("No finite values available for model initialisation.")
             self._init_gp(x, y)
         else:
             # Reconstruct with new data
@@ -350,6 +316,7 @@ class GPyRegression:
 
         if optimize:
             self.optimize()
+            self._gp_hyperparams[self._gp.num_data] = self._gp.param_array
 
     def optimize(self):
         """Optimize GP hyperparameters."""
@@ -446,6 +413,7 @@ class RobustGPyRegression(GPyRegression):
 
         self._clf = clf
         self._clf_kernel = clf_kernel or GPy.kern.RBF(self.input_dim, ARD=True)
+        self._clf_hyperparams = {}
 
         self.FAILED_OUTPUT = np.inf
 
@@ -544,13 +512,16 @@ class RobustGPyRegression(GPyRegression):
             labels = np.isfinite(self._Y).astype(int)
             if self._clf is not None:
                 # Reconstruct with new data
-                self._clf = self._make_classifier_instance(self.X, labels, self._clf.kern.copy())
+                self._clf = self._make_classifier_instance(self._X, labels, self._clf.kern.copy())
             elif not mask.all():
                 # Initialise
-                self._clf = self._make_classifier_instance(self.X, labels, self._clf_kernel)
+                self._clf = self._make_classifier_instance(self._X, labels, self._clf_kernel)
 
         if optimize:
             self.optimize()
+            self._gp_hyperparams[self._gp.num_data] = self._gp.param_array
+            if self._clf is not None:
+                self._clf_hyperparams[self._clf.num_data] = self._clf.param_array
 
     def optimize(self):
         """Optimize GP hyperparameters."""
@@ -562,17 +533,17 @@ class RobustGPyRegression(GPyRegression):
                 logger.warning("Numerical error in GP optimization. Stopping optimization")
 
     @property
-    def n_evidence(self):
+    def n_evidence_all(self):
         """Return the number of observed samples."""
         return len(self._Y)
 
     @property
-    def X(self):
+    def X_all(self):
         """Return input evidence."""
         return self._X
 
     @property
-    def Y(self):
+    def Y_all(self):
         """Return output evidence."""
         return self._Y
 
@@ -594,97 +565,3 @@ class RobustGPyRegression(GPyRegression):
             kopy._clf_kernel = self._clf_kernel.copy()
 
         return kopy
-
-
-class GPyClassifier:
-
-    def __init__(self, kernel=None, mean_function=None, thd=0.5):
-        """Initialize the Gaussian process classifier.
-
-        Parameters
-        ----------
-        kernel : GPy.kern, optional
-            Kernel function, defaults to RBF.
-        mean_function : GPy.core.Mapping, optional
-            Mean function, defaults to zero.
-
-        """
-        self.kernel = kernel or RBF(input_dim, ARD=True)
-        self.mean_function = mean_function
-        self.model = None
-        self.thd = thd
-        self.last_optim = 0
-
-    def fit(self, x, y):
-        """Fit the Gaussian process classifier.
-
-        Parameters
-        ----------
-        x: np.ndarray (n_samples, n_features)
-            Feature vectors of data.
-        y: np.ndarray (n_samples, )
-            Target values, must be binary.
-
-        """
-        self.model = self._initialize_model(x, y.reshape(-1, 1))
-        self.model.optimize()
-        self.last_optim = self.n_evidence
-
-    def update(self, x, y, optimize=False):
-        """Update the Gaussian process classifier.
-
-        Parameters
-        ----------
-        X: np.ndarray (n_samples, n_features)
-            Feature vectors of data.
-        y: np.ndarray (n_samples, 1)
-            Target values, must be binary.
-        optimize : bool, optional
-            Whether to optimize hyperparameters.
-
-        """
-        if self.model is None:
-            self.model = self._initialize_model(x, y)
-        else:
-            x = np.r_[self.model.X, x]
-            y = np.r_[self.model.Y, y]
-            self.model.set_XY(x, y)
-        if optimize:
-            self.model.optimize()
-            self.last_optim = self.n_evidence
-
-    def predict(self, X, thd=None):
-        """Predict class labels.
-
-        Parameters
-        ----------
-        X: np.ndarray (n_samples, n_features)
-            Feature vectors of data.
-
-        Returns
-        -------
-        np.ndarray
-
-        """
-        thd = thd or self.thd
-        return (self.model.predict(X)[0] > thd).reshape(-1).astype(int)
-
-    def _initialize_model(self, x, y):
-        """Initialize the Gaussian process classifier."""
-        kernel = self.kernel.copy()
-        mean_function = self.mean_function.copy() if self.mean_function else None
-        return GPy.models.GPClassification(x, y, kernel=kernel, mean_function=mean_function)
-
-    @property
-    def X(self):
-        return self.model.X
-
-    @property
-    def Y(self):
-        return self.model.Y
-
-    @property
-    def n_evidence(self):
-        if self.model is None:
-            return 0
-        return self.model.num_data
