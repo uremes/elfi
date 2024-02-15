@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats as ss
 
+from elfi.methods.bo.gpy_regression import RobustGPyRegression
 from elfi.methods.bo.utils import minimize
 from elfi.model.extensions import ModelPrior
 from elfi.visualization.visualization import ProgressBar
@@ -55,7 +56,9 @@ class BolfiPosterior:
         """
         super(BolfiPosterior, self).__init__()
         self.threshold = threshold
-        self.model = model
+        self.model = model.copy()  # Make a copy in case we continue to train the surrogate
+        if isinstance(self.model, RobustGPyRegression) and self.model._clf is not None:
+            self.model.thd = 0.5
         self.random_state = np.random.RandomState(seed)
         self.n_inits = n_inits
         self.max_opt_iters = max_opt_iters

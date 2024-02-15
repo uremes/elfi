@@ -367,9 +367,9 @@ class GPyRegression:
 
         return kopy
 
-    def __copy__(self):
-        """Return a copy of current instance."""
-        return self.copy()
+    #def __copy__(self):
+    #    """Return a copy of current instance."""
+    #    return self.copy()
 
 
 class RobustGPyRegression(GPyRegression):
@@ -381,6 +381,7 @@ class RobustGPyRegression(GPyRegression):
     def __init__(self,
                  parameter_names=None,
                  bounds=None,
+                 train_classifier=False,
                  thd=0,
                  clf=None,
                  clf_kernel=None,
@@ -396,6 +397,8 @@ class RobustGPyRegression(GPyRegression):
             model.parameters.
             `{'parameter_name':(lower, upper), ... }`
             If not supplied, defaults to (0, 1) bounds for all dimensions.
+        train_classifier : boolean, optional
+            Train a classifier to predict failure probabilities.
         thd : float, optional
             Threshold value to exclude inputs that return infinite output values.
         clf: GPy.models.GPClassification instance, optional
@@ -407,15 +410,29 @@ class RobustGPyRegression(GPyRegression):
         """
         super().__init__(parameter_names, bounds, **kwargs)
 
-        self.thd = thd
         self._X = np.zeros((0, self.input_dim))
         self._Y = np.zeros((0, 1))
+
+        self.thd = thd
+        self.train_classifier = self.thd > 0 or train_classifier
 
         self._clf = clf
         self._clf_kernel = clf_kernel or GPy.kern.RBF(self.input_dim, ARD=True)
         self._clf_hyperparams = {}
 
         self.FAILED_OUTPUT = np.inf
+
+    def success_proba(self, x):
+        if self._clf is not None:
+            return self._clf.predict(x)[0]
+        else:
+            return np.zeros((len(x), 1))
+
+    def success_proba_gradients(self, x):
+        if self._clf is not None:
+            return self._clf.predictive_gradients(x)[0]
+        else:
+            return np.zeros_like((x))[:, :, None]
 
     def predict(self, x, **kwargs):
         """Return predicted mean and variance at x.
@@ -440,9 +457,8 @@ class RobustGPyRegression(GPyRegression):
         x = np.asanyarray(x).reshape((-1, self.input_dim))
         mean, var = super().predict(x)
 
-        # Predict failures
-        if self._clf is not None:
-            mask = (self._clf.predict(x)[0] < self.thd).reshape(-1)
+        if self.thd > 0 and self._clf is not None:
+            mask = (self.success_proba(x) < self.thd).reshape(-1)
             mean[mask] = self.FAILED_OUTPUT
             var[mask] = 0
 
@@ -471,9 +487,8 @@ class RobustGPyRegression(GPyRegression):
         x = np.asanyarray(x).reshape((-1, self.input_dim))
         grad_mean, grad_var = super().predictive_gradients(x)
 
-        # Predict failures
-        if self._clf is not None:
-            mask = (self._clf.predict(x)[0] < self.thd).reshape(-1)
+        if self.thd > 0 and self._clf is not None:
+            mask = (self.success_proba(x) < self.thd).reshape(-1)
             grad_mean[mask] = 0
             grad_var[mask] = 0
 
@@ -508,7 +523,7 @@ class RobustGPyRegression(GPyRegression):
             raise RuntimeError("No finite outputs available for model initialisation.")
 
         # Update classification model
-        if self.thd > 0:
+        if self.train_classifier:
             labels = np.isfinite(self._Y).astype(int)
             if self._clf is not None:
                 # Reconstruct with new data
@@ -534,18 +549,25 @@ class RobustGPyRegression(GPyRegression):
 
     @property
     def n_evidence_all(self):
-        """Return the number of observed samples."""
+        """Return the number of observed samples with failed simulations included."""
         return len(self._Y)
 
     @property
+    def failed(self):
+        """Return inputs that resulted in failed simulations."""
+        return self._X[~np.isfinite(self._Y).reshape(-1)]
+
+    @property
     def X_all(self):
-        """Return input evidence."""
+        """Return all inputs."""
         return self._X
 
     @property
     def Y_all(self):
-        """Return output evidence."""
-        return self._Y
+        """Return all outputs."""
+        Y = self._Y.copy()
+        Y[~np.isfinite(Y)] = self.FAILED_OUTPUT
+        return Y
 
     @property
     def classifier_instance(self):
