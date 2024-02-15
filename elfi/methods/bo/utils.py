@@ -110,6 +110,58 @@ def minimize(fun,
     return locs[ind_min], vals[ind_min]
 
 
+def make_with_additive_cost(acquisition_class, cost_function):
+    """
+    Make acquisition function with additive cost.
+
+    Returns
+    -------
+    CostAwareAcquisition
+
+    """
+    class CostAwareAcquisition(acquisition_class):
+
+        def __init__(self, model, **kwargs):
+            super().__init__(model=model, **kwargs)
+            self._cost = cost_function
+
+        def evaluate(self, theta_new, t=None):
+            return super().evaluate(theta_new, t=t) + self._cost.evaluate(theta_new)
+
+        def evaluate_gradient(self, theta_new, t=None):
+            t1 = super().evaluate_gradient(theta_new, t=t)
+            t2 = self._cost.evaluate_gradient(theta_new)
+            return t1 + t2
+
+    return CostAwareAcquisition
+
+
+def make_with_multiplicative_cost(acquisition_class, cost_function):
+    """
+    Make acquisition function with multiplicative cost.
+
+    Returns
+    -------
+    CostAwareAcquisition
+
+    """
+    class CostAwareAcquisition(acquisition_class):
+
+        def __init__(self, model, **kwargs):
+            super().__init__(model=model, **kwargs)
+            self._cost = cost_function
+
+        def evaluate(self, theta_new, t=None):
+            return super().evaluate(theta_new, t=t) * self._cost.evaluate(theta_new)
+
+        def evaluate_gradient(self, theta_new, t=None):
+            t1 = super().evaluate_gradient(theta_new, t=t) + self._cost.evaluate(theta_new)
+            t2 = super().evaluate(theta_new, t=t) + self._cost.evaluate_gradient(theta_new)
+            return t1 + t2
+
+    return CostAwareAcquisition
+
+
 class CostFunction:
     """Convenience class for modelling acquisition costs."""
 
