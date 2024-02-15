@@ -367,10 +367,6 @@ class GPyRegression:
 
         return kopy
 
-    #def __copy__(self):
-    #    """Return a copy of current instance."""
-    #    return self.copy()
-
 
 class RobustGPyRegression(GPyRegression):
     """Robust Gaussian Process regression using the GPy library.
@@ -587,3 +583,4 @@ class RobustGPyRegression(GPyRegression):
             kopy._clf_kernel = self._clf_kernel.copy()
 
         return kopy
+
