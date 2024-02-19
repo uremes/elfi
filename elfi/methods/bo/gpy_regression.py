@@ -143,11 +143,9 @@ class GPyRegression:
             self._rbf_is_cached = False  # in case one resumes fitting the GP after sampling
 
         if noiseless:
-            pred = self._gp.predict_noiseless(x)
+            return self._gp.predict_noiseless(x)
         else:
-            pred = self._gp.predict(x)
-
-        return pred
+            return self._gp.predict(x)
 
     # TODO: find a more general solution
     # cache some RBF-kernel-specific values for faster sampling
@@ -419,16 +417,42 @@ class RobustGPyRegression(GPyRegression):
         self.FAILED_OUTPUT = np.inf
 
     def success_proba(self, x):
+        """Return predicted finite output probabilities at x.
+
+        Parameters
+        ----------
+        x : np.array
+            numpy compatible (n, input_dim) array of points to evaluate
+
+        Returns
+        -------
+        np.array
+            with shape (x.shape[0], 1)
+
+        """
         if self._clf is not None:
             return self._clf.predict(x)[0]
         else:
             return np.zeros((len(x), 1))
 
     def success_proba_gradients(self, x):
+        """Return predicted finite output probability gradients at x.
+
+        Parameters
+        ----------
+        x : np.array
+            numpy compatible (n, input_dim) array of points to evaluate
+
+        Returns
+        -------
+        np.array
+            with shape (x.shape[0], input_dim)
+
+        """
         if self._clf is not None:
-            return self._clf.predictive_gradients(x)[0]
+            return self._clf.predictive_gradients(x)[0][:, :, 0]
         else:
-            return np.zeros_like((x))[:, :, None]
+            return np.zeros_like((x))
 
     def predict(self, x, **kwargs):
         """Return predicted mean and variance at x.
@@ -583,4 +607,3 @@ class RobustGPyRegression(GPyRegression):
             kopy._clf_kernel = self._clf_kernel.copy()
 
         return kopy
-
