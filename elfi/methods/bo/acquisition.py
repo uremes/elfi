@@ -365,16 +365,14 @@ class MaxVar(AcquisitionBase):
         # Updating the ABC threshold.
         self.eps = np.percentile(gp.Y, self.quantile_eps * 100)
 
-        def _negate_eval(theta):
-            return -self.evaluate(theta)
-
-        def _negate_eval_grad(theta):
-            return -self.evaluate_gradient(theta)
+        def _negate_eval_with_grad(theta):
+            val, grad = self.evaluate_with_gradient(theta)
+            return -val, -grad
 
         # Obtaining the location where the variance is maximised.
-        theta_max, _ = minimize(_negate_eval,
+        theta_max, _ = minimize(_negate_eval_with_grad,
                                 gp.bounds,
-                                grad=_negate_eval_grad,
+                                grad=True,
                                 prior=self.prior,
                                 n_start_points=self.n_inits,
                                 maxiter=self.max_opt_iters,
@@ -464,6 +462,57 @@ class MaxVar(AcquisitionBase):
             term_prior**2 * (grad_int_1 - grad_int_2)
         return gradient
 
+    def evaluate_with_gradient(self, theta_new, t=None):
+        """Evaluate the acquisition function's gradient at the location theta_new.
+
+        Parameters
+        ----------
+        theta_new : array_like
+            Evaluation coordinates.
+        t : int, optional
+            Current iteration, (unused).
+
+        Returns
+        -------
+        array_like
+            Gradient of the variance of the approximate posterior
+
+        """
+        phi = ss.norm.cdf
+        mean, var = self.model.predict(theta_new, noiseless=True)
+        grad_mean, grad_var = self.model.predictive_gradients(theta_new)
+        sigma2_n = self.model.noise
+        scale = np.sqrt(sigma2_n + var)
+
+        a = (self.eps - mean) / scale
+        b = np.sqrt(sigma2_n) / np.sqrt(sigma2_n + 2 * var)  # skewness
+        grad_a = (-1. / scale) * grad_mean - \
+            ((self.eps - mean) / (2. * (sigma2_n + var)**(1.5))) * grad_var
+        grad_b = (-np.sqrt(sigma2_n) / (sigma2_n + 2 * var)**(1.5)) * grad_var
+
+        phi_norm = phi(a)
+        phi_skew = ss.skewnorm.cdf(self.eps, b, loc=mean, scale=scale)
+        var_p_a = phi_skew - phi_norm**2
+        term_prior = self.prior.pdf(theta_new).ravel()[:, np.newaxis]
+        var_approx_posterior = term_prior**2 * var_p_a
+
+        int_1 = phi_norm - phi_norm**2
+        int_2 = phi_norm - phi_skew
+        grad_int_1 = (1. - 2 * phi_norm) * \
+            (np.exp(-.5 * (a**2)) / np.sqrt(2. * np.pi)) * grad_a
+        grad_int_2 = (1. / np.pi) * \
+            (((np.exp(-.5 * (a**2) * (1. + b**2))) / (1. + b**2)) * grad_b
+                + (np.sqrt(np.pi / 2.) * np.exp(-.5 * (a**2)) * (1. - 2. * phi(a * b)) * grad_a))
+
+        # Obtaining the gradient prior by applying the following rule:
+        # (log f(x))' = f'(x)/f(x) => f'(x) = (log f(x))' * f(x)
+        grad_prior_log = self.prior.gradient_logpdf(theta_new)
+        term_grad_prior = term_prior * grad_prior_log
+
+        gradient = 2. * term_prior * (int_1 - int_2) * term_grad_prior + \
+            term_prior**2 * (grad_int_1 - grad_int_2)
+        return var_approx_posterior, gradient
+
 
 class RandMaxVar(MaxVar):
     r"""The randomised maximum variance acquisition method.
@@ -548,10 +597,10 @@ class RandMaxVar(MaxVar):
         self.eps = np.percentile(gp.Y, self.quantile_eps * 100)
 
         def _evaluate_gradient_logpdf(theta):
-            denominator = self.evaluate(theta)
+            denominator, grad = self.evaluate_with_gradient(theta)
             if denominator == 0:
                 return -np.inf
-            pt_eval = self.evaluate_gradient(theta) / denominator
+            pt_eval = grad / denominator
             return pt_eval.ravel()
 
         def _evaluate_logpdf(theta):
