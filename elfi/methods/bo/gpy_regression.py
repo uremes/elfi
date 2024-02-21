@@ -83,7 +83,7 @@ class GPyRegression:
         self.max_opt_iters = max_opt_iters
 
         self._gp = gp
-        self._gp_hyperparams = {}
+        self._gp_hyperparams = []
 
         self._rbf_is_cached = False
         self.is_sampling = False  # set to True once in sampling phase
@@ -314,7 +314,7 @@ class GPyRegression:
 
         if optimize:
             self.optimize()
-            self._gp_hyperparams[self._gp.num_data] = self._gp.param_array
+            self._gp_hyperparams.append(self._gp.param_array)
 
     def optimize(self):
         """Optimize GP hyperparameters."""
@@ -412,7 +412,7 @@ class RobustGPyRegression(GPyRegression):
 
         self._clf = clf
         self._clf_kernel = clf_kernel or GPy.kern.RBF(self.input_dim, ARD=True)
-        self._clf_hyperparams = {}
+        self._clf_hyperparams = []
 
         self.FAILED_OUTPUT = np.inf
 
@@ -554,9 +554,9 @@ class RobustGPyRegression(GPyRegression):
 
         if optimize:
             self.optimize()
-            self._gp_hyperparams[self._gp.num_data] = self._gp.param_array
+            self._gp_hyperparams.append(self._gp.param_array)
             if self._clf is not None:
-                self._clf_hyperparams[self._clf.num_data] = self._clf.param_array
+                self._clf_hyperparams.append(self._clf.param_array)
 
     def optimize(self):
         """Optimize GP hyperparameters."""
