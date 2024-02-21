@@ -133,6 +133,12 @@ def make_with_additive_cost(acquisition_class, cost_function):
             t2 = self._cost.evaluate_gradient(theta_new)
             return t1 + t2
 
+        def evaluate_with_gradient(self, theta_new, t=None):
+            cost = self._cost.evaluate(theta_new)
+            cost_grad = self._cost.evaluate_gradient(theta_new)
+            value, value_grad = super().evaluate_with_gradient(theta_new, t=t)
+            return value + cost, value_grad + cost_grad
+
     return CostAwareAcquisition
 
 
@@ -155,9 +161,15 @@ def make_with_multiplicative_cost(acquisition_class, cost_function):
             return super().evaluate(theta_new, t=t) * self._cost.evaluate(theta_new)
 
         def evaluate_gradient(self, theta_new, t=None):
-            t1 = super().evaluate_gradient(theta_new, t=t) + self._cost.evaluate(theta_new)
-            t2 = super().evaluate(theta_new, t=t) + self._cost.evaluate_gradient(theta_new)
+            t1 = super().evaluate_gradient(theta_new, t=t) * self._cost.evaluate(theta_new)
+            t2 = super().evaluate(theta_new, t=t) * self._cost.evaluate_gradient(theta_new)
             return t1 + t2
+
+        def evaluate_with_gradient(self, theta_new, t=None):
+            cost = self._cost.evaluate(theta_new)
+            cost_grad = self._cost.evaluate_gradient(theta_new)
+            value, value_grad = super().evaluate_with_gradient(theta_new, t=t)
+            return value * cost, value_grad * cost + value * cost_grad
 
     return CostAwareAcquisition
 
