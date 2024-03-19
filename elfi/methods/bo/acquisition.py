@@ -463,7 +463,7 @@ class MaxVar(AcquisitionBase):
         return gradient
 
     def evaluate_with_gradient(self, theta_new, t=None):
-        """Evaluate the acquisition function's gradient at the location theta_new.
+        """Evaluate the acquisition function and its gradient at the location theta_new.
 
         Parameters
         ----------
@@ -474,8 +474,8 @@ class MaxVar(AcquisitionBase):
 
         Returns
         -------
-        array_like
-            Gradient of the variance of the approximate posterior
+        tuple (array_like, array_like)
+            A tuple containing the variance of the approximate posterior and its gradient.
 
         """
         phi = ss.norm.cdf
