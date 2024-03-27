@@ -1,5 +1,9 @@
 """This module contains tools for ELFI graphs."""
 
+__all__ = ['vectorize', 'external_operation', 'safe_operation']
+
+import logging
+import signal
 import subprocess
 from functools import partial
 
@@ -7,7 +11,7 @@ import numpy as np
 
 from elfi.utils import get_sub_seed, is_array
 
-__all__ = ['vectorize', 'external_operation']
+logger = logging.getLogger(__name__)
 
 
 def run_vectorized(operation, *inputs, constants=None, dtype=None, batch_size=None, **kwargs):
@@ -284,3 +288,75 @@ def external_operation(command,
         prepare_inputs=prepare_inputs,
         stdout=stdout,
         subprocess_kwargs=subprocess_kwargs)
+
+
+def timeout_handler(signum, frame):
+    raise TimeoutError("Timeout exceeded.")
+
+
+def run_safely(operation, *inputs, failed_output=None, timeout=0, **kwargs):
+    """Run an operation safely with timeout and recovery.
+
+    This tool is still experimental and may not work in all cases.
+
+    Parameters
+    ----------
+    operation : callable
+        Operation to be executed.
+    inputs
+        Positional arguments for the operation.
+    failed_output : optional
+        Output used when an exception or timeout occurs during operation. Defaults to None.
+    timeout : int, optional
+        Operation timeout in seconds. Defaults to no timeout.
+    kwargs
+        Keyword arguments for the operation.
+
+    Returns
+    -------
+    output : any
+        Operation output or failed_output if operation failed.
+
+    """
+    signal.alarm(timeout)
+    try:
+        output = operation(*inputs, **kwargs)
+    except Exception as e:
+        logger.warning("Exception occurred: {}".format(e))
+        batch_size = kwargs.get('batch_size', None)
+        output = np.array([failed_output] * batch_size) if batch_size else failed_output
+    finally:
+        signal.alarm(0)
+    return output
+
+
+def safe_operation(operation, failed_output=None, shape=None, dtype=None, timeout=0):
+    """Wrap an operation to run safely with timeout and recovery.
+
+    This tool is still experimental and may not work in all cases.
+
+    Parameters
+    ----------
+    operation : callable
+        Operation to be executed.
+    failed_output : optional
+        Output used when an exception or timeout occurs during operation. Defaults to
+        None or an array with nan values.
+    shape : tuple, optional
+        Operation output array shape. Used to create failed output array.
+    dtype : dtype, optional
+        Operation output array data type. Used to create failed output array.
+    timeout : int, optional
+        Operation timeout in seconds. Defaults to no timeout.
+
+    Returns
+    -------
+    operation : callable
+        ELFI compatible operation that can be used e.g. as a simulator
+
+    """
+    if failed_output is None and shape is not None:
+        failed_output = np.full(shape, np.nan, dtype=dtype)
+    if timeout > 0:
+        signal.signal(signal.SIGALRM, timeout_handler)
+    return partial(run_safely, operation, failed_output=failed_output, timeout=timeout)
