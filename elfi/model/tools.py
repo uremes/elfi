@@ -290,48 +290,88 @@ def external_operation(command,
         subprocess_kwargs=subprocess_kwargs)
 
 
-def timeout_handler(signum, frame):
-    raise TimeoutError("Timeout exceeded.")
+def run_with_recovery(operation, errors, *inputs, error_output=None, **kwargs):
+    """Run the operation with error recovery.
 
-
-def run_safely(operation, *inputs, failed_output=None, timeout=0, **kwargs):
-    """Run an operation safely with timeout and recovery.
-
+    Helper that returns a predetermined output when an accepted error occurs in the operation.
     This tool is still experimental and may not work in all cases.
 
     Parameters
     ----------
     operation : callable
         Operation to be executed.
+    errors : Exception or tuple
+        Accepted errors.
     inputs
         Positional arguments for the operation.
-    failed_output : optional
-        Output used when an exception or timeout occurs during operation. Defaults to None.
-    timeout : int, optional
-        Operation timeout in seconds. Defaults to no timeout.
+    error_output : any, optional
+        Output to return when an accepted error occurs. Defaults to None.
     kwargs
         Keyword arguments for the operation.
 
     Returns
     -------
     output : any
-        Operation output or failed_output if operation failed.
+        Operation output or error_output if operation failed with an accepted error.
 
     """
-    signal.alarm(timeout)
     try:
         output = operation(*inputs, **kwargs)
-    except Exception as e:
+    except errors as e:
         logger.warning("Exception occurred: {}".format(e))
         batch_size = kwargs.get('batch_size', None)
-        output = np.array([failed_output] * batch_size) if batch_size else failed_output
-    finally:
-        signal.alarm(0)
+        output = np.array([error_output] * batch_size) if batch_size else error_output
     return output
 
 
-def safe_operation(operation, failed_output=None, shape=None, dtype=None, timeout=0):
-    """Wrap an operation to run safely with timeout and recovery.
+def run_with_time_limit(operation, time_limit, *inputs, error_output=None, **kwargs):
+    """Run the operation with time limit.
+
+    Helper that terminates the operation at time limit and returns a predetermined output.
+    This tool is still experimental and may not work in all cases.
+
+    Parameters
+    ----------
+    operation : callable
+        Operation to be executed.
+    time_limit : int
+        Operation time limit in seconds.
+    inputs
+        Positional arguments for the operation.
+    error_output : any, optional
+        Output to return when the operation exceeds time limit. Defaults to None.
+    kwargs
+        Keyword arguments for the operation.
+
+    Returns
+    -------
+    output : any
+        Operation output or error_output if operation exceeded time limit.
+
+    """
+    def timeout_handler(signum, frame):
+        raise TimeoutError
+
+    try:
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(time_limit)
+        output = operation(*inputs, **kwargs)
+    except TimeoutError:
+        logger.warning("Operation exceeded time limit.")
+        batch_size = kwargs.get('batch_size', None)
+        output = np.array([error_output] * batch_size) if batch_size else error_output
+    finally:
+        signal.alarm(0)  # cancel the alarm
+    return output
+
+
+def safe_operation(operation,
+                   errors=None,
+                   time_limit=0,
+                   error_output=None,
+                   shape=None,
+                   dtype=None):
+    """Wrap an operation to run with timeout and recovery options.
 
     This tool is still experimental and may not work in all cases.
 
@@ -339,15 +379,17 @@ def safe_operation(operation, failed_output=None, shape=None, dtype=None, timeou
     ----------
     operation : callable
         Operation to be executed.
-    failed_output : optional
-        Output used when an exception or timeout occurs during operation. Defaults to
-        None or an array with nan values.
+    errors : Exception or tuple
+        Accepted errors. Defaults to None.
+    time_limit : int, optional
+        Operation time limit in seconds. Defaults to no time limit.
+    error_output : any, optional
+        Output to return when an accepted error occurs or the operation exceeds time limit.
+        Defaults to None or a nan array in the requested shape.
     shape : tuple, optional
-        Operation output array shape. Used to create failed output array.
+        Operation output array shape. Used to create the default nan array.
     dtype : dtype, optional
-        Operation output array data type. Used to create failed output array.
-    timeout : int, optional
-        Operation timeout in seconds. Defaults to no timeout.
+        Operation output array data type. Used to create the default nan array.
 
     Returns
     -------
@@ -355,8 +397,10 @@ def safe_operation(operation, failed_output=None, shape=None, dtype=None, timeou
         ELFI compatible operation that can be used e.g. as a simulator
 
     """
-    if failed_output is None and shape is not None:
-        failed_output = np.full(shape, np.nan, dtype=dtype)
-    if timeout > 0:
-        signal.signal(signal.SIGALRM, timeout_handler)
-    return partial(run_safely, operation, failed_output=failed_output, timeout=timeout)
+    if error_output is None and shape is not None:
+        error_output = np.full(shape, np.nan, dtype=dtype)
+    if time_limit > 0:
+        operation = partial(run_with_time_limit, operation, time_limit, error_output=error_output)
+    if errors is not None:
+        operation = partial(run_with_recovery, operation, errors, error_output=error_output)
+    return operation
