@@ -430,10 +430,13 @@ class RobustGPyRegression(GPyRegression):
             with shape (x.shape[0], 1)
 
         """
+        # Ensure it's 2d for GPy
+        x = np.asanyarray(x).reshape((-1, self.input_dim))
+
         if self._clf is not None:
             return self._clf.predict(x)[0]
         else:
-            return np.zeros((len(x), 1))
+            return np.ones((len(x), 1))
 
     def success_proba_gradients(self, x):
         """Return predicted finite output probability gradients at x.
@@ -449,6 +452,9 @@ class RobustGPyRegression(GPyRegression):
             with shape (x.shape[0], input_dim)
 
         """
+        # Ensure it's 2d for GPy
+        x = np.asanyarray(x).reshape((-1, self.input_dim))
+
         if self._clf is not None:
             return self._clf.predictive_gradients(x)[0][:, :, 0]
         else:
