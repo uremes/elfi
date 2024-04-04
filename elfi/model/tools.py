@@ -365,12 +365,12 @@ def run_with_time_limit(operation, time_limit, *inputs, error_output=None, **kwa
     return output
 
 
-def safe_operation(operation,
-                   errors=None,
-                   time_limit=0,
-                   error_output=None,
-                   shape=None,
-                   dtype=None):
+def unreliable_operation(operation,
+                         errors=None,
+                         time_limit=0,
+                         error_output=None,
+                         shape=None,
+                         dtype=None):
     """Wrap an operation to run with timeout and recovery options.
 
     This tool is still experimental and may not work in all cases.
