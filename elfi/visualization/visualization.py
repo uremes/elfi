@@ -421,6 +421,47 @@ def plot_discrepancy(gp, parameter_names, axes=None, **kwargs):
 
     return axes
 
+def plot_evidence(gp, axes=None, init=None, true_params=None, **kwargs):
+    """Plot evidence index vs. parameter values and discrepancies.
+
+    Parameters
+    ----------
+    gp : GPyRegression
+    axes : plt.Axes or arraylike of plt.Axes, optional
+    init: int, optional
+    true_params : dict, optional
+        Dictionary containing parameter names with corresponding true parameter values.
+
+    Returns
+    -------
+    axes : np.array of plt.Axes
+
+    """
+    n_plots = gp.input_dim + 1
+    kwargs['sharex'] = kwargs.get('sharex', True)
+    axes, kwargs = _create_axes(axes, (n_plots, 1), **kwargs)
+    axes = axes.ravel()
+
+    inds = np.arange(gp.n_evidence)
+    axes[0].set_xlim((0, gp.n_evidence))
+    axes[0].scatter(inds, gp.Y, **kwargs)
+    axes[0].set_ylabel('Discrepancy')
+    for ii in range(gp.input_dim):
+        axes[ii + 1].scatter(inds, gp.X[:, ii], **kwargs)
+        axes[ii + 1].set_ylabel(gp.parameter_names[ii])
+    axes[-1].set_xlabel('Evidence index')
+
+    if init is not None:
+        for ii in range(n_plots):
+            axes[ii].axvspan(0, init, alpha=0.1, label='Initial evidence')
+
+    if true_params is not None:
+        for ii in range(gp.input_dim):
+            value = true_params[gp.parameter_names[ii]]
+            axes[ii + 1].axhline(value, alpha=0.75, color='r', label='True parameters')
+
+    return axes
+
 
 def plot_gp(gp, parameter_names, axes=None, resol=50,
             const=None, bounds=None, true_params=None, **kwargs):
