@@ -384,6 +384,87 @@ def plot_params_vs_node(node, n_samples=100, func=None, seed=None, axes=None, **
     return axes
 
 
+def plot_ordered(data, labels, plot_type='line', start=None, end=None, axes=None, **kwargs):
+    """Plot ordered data index vs. feature values.
+
+    Parameters
+    ----------
+    data : np.array
+        Dataset with shape (n_points, n_features).
+    labels: list
+        Feature names.
+    plot_type: str, optional
+        Choose between 'line' (default) or 'scatter'.
+    start : int, optional
+        Plot start index. Defaults to 1.
+    end : int, optional
+        Plot end index. Defaults n_points.
+    axes : iterable of plt.Axes, optional
+        Each feature is plotted on a separate axis.
+    kwargs : dict, optional
+        Optional keywords used to control the axes and the plots.
+
+    Returns
+    -------
+    axes : np.array of plt.Axes
+
+    """
+    n_points, n_plots = data.shape
+    kwargs['sharex'] = kwargs.get('sharex', True)
+    kwargs['figsize'] = kwargs.get('figsize', (10, 2 * n_plots))
+    axes, kwargs = _create_axes(axes, (n_plots, 1), **kwargs)
+    axes = axes.ravel()
+
+    plot_functions = {
+        'line': lambda ax, x, y: ax.plot(x, y, **kwargs),
+        'scatter': lambda ax, x, y: ax.scatter(x, y, **kwargs)
+    }
+
+    start = start or 1
+    end = end or n_points
+    inds = start + np.arange(end - start + 1)
+    axes[0].set_xlim((start - 1, end + 1))
+    for ii in range(n_plots):
+        plot_functions[plot_type](axes[ii], inds, data[start - 1:end, ii])
+        axes[ii].set_ylabel(labels[ii])
+    axes[-1].set_xlabel('Index')
+
+    return axes
+
+
+def plot_evidence_hist(gp, axes=None, init=None, true_params=None, **kwargs):
+    """Plot evidence index vs. parameter values and discrepancies.
+
+    Parameters
+    ----------
+    gp : GPyRegression, required
+    axes : plt.Axes or arraylike of plt.Axes, optional
+    init: int, optional
+        Number of initial evidence.
+    true_params : dict, optional
+        Dictionary containing parameter names with corresponding true parameter values.
+
+    Returns
+    -------
+    axes : np.array of plt.Axes
+
+    """
+    data = np.hstack((gp.Y, gp.X))
+    labels = ['Discrepancy'] + gp.parameter_names
+    axes = plot_ordered(data, labels, plot_type='scatter', **kwargs)
+
+    if init is not None:
+        for ii in range(gp.input_dim + 1):
+            axes[ii].axvspan(0, init, alpha=0.1)
+
+    if true_params is not None:
+        for ii in range(gp.input_dim):
+            value = true_params[gp.parameter_names[ii]]
+            axes[ii + 1].axhline(value, alpha=0.75, color='r')
+
+    return axes
+
+
 def plot_discrepancy(gp, parameter_names, axes=None, **kwargs):
     """Plot acquired parameters vs. resulting discrepancy.
 
@@ -418,47 +499,6 @@ def plot_discrepancy(gp, parameter_names, axes=None, **kwargs):
 
     for idx in range(len(parameter_names), len(axes)):
         axes[idx].set_axis_off()
-
-    return axes
-
-def plot_evidence(gp, axes=None, init=None, true_params=None, **kwargs):
-    """Plot evidence index vs. parameter values and discrepancies.
-
-    Parameters
-    ----------
-    gp : GPyRegression
-    axes : plt.Axes or arraylike of plt.Axes, optional
-    init: int, optional
-    true_params : dict, optional
-        Dictionary containing parameter names with corresponding true parameter values.
-
-    Returns
-    -------
-    axes : np.array of plt.Axes
-
-    """
-    n_plots = gp.input_dim + 1
-    kwargs['sharex'] = kwargs.get('sharex', True)
-    axes, kwargs = _create_axes(axes, (n_plots, 1), **kwargs)
-    axes = axes.ravel()
-
-    inds = np.arange(gp.n_evidence)
-    axes[0].set_xlim((0, gp.n_evidence))
-    axes[0].scatter(inds, gp.Y, **kwargs)
-    axes[0].set_ylabel('Discrepancy')
-    for ii in range(gp.input_dim):
-        axes[ii + 1].scatter(inds, gp.X[:, ii], **kwargs)
-        axes[ii + 1].set_ylabel(gp.parameter_names[ii])
-    axes[-1].set_xlabel('Evidence index')
-
-    if init is not None:
-        for ii in range(n_plots):
-            axes[ii].axvspan(0, init, alpha=0.1, label='Initial evidence')
-
-    if true_params is not None:
-        for ii in range(gp.input_dim):
-            value = true_params[gp.parameter_names[ii]]
-            axes[ii + 1].axhline(value, alpha=0.75, color='r', label='True parameters')
 
     return axes
 

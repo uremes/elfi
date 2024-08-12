@@ -345,6 +345,20 @@ class GPyRegression:
         return self._gp.Gaussian_noise.variance[0]
 
     @property
+    def param_array(self):
+        """Return hyperparameter values."""
+        return self._gp.param_array
+
+    @property
+    def param_names(self):
+        """Return hyperparameter names."""
+        names = []
+        for param in self._gp.parameter_names():
+            for rr in range(self._gp[param].size):
+                names.append(param)
+        return names
+
+    @property
     def instance(self):
         """Return the gp instance."""
         return self._gp

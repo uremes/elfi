@@ -39,6 +39,7 @@ class BayesianOptimization(ParameterInference):
                  batch_size=1,
                  batches_per_acquisition=None,
                  async_acq=False,
+                 save_params=False,
                  **kwargs):
         """Initialize Bayesian optimization.
 
@@ -75,6 +76,8 @@ class BayesianOptimization(ParameterInference):
             efficient with a large amount of workers (e.g. in cluster environments) but
             forgoes the guarantee for the exactly same result with the same initial
             conditions (e.g. the seed). Default False.
+        save_params : bool, optional
+            Record target model hyperparameter values.
         **kwargs
 
         """
@@ -114,6 +117,9 @@ class BayesianOptimization(ParameterInference):
         self.state['n_evidence'] = self.n_precomputed_evidence
         self.state['last_GP_update'] = self.n_initial_evidence
         self.state['acquisition'] = []
+
+        self.save_params = save_params
+        self.params_hist = []
 
     def _resolve_initial_evidence(self, initial_evidence):
         # Some sensibility limit for starting GP regression
@@ -214,6 +220,9 @@ class BayesianOptimization(ParameterInference):
 
         params = batch_to_arr2d(batch, self.target_model.parameter_names)
         self._report_batch(batch_index, params, batch[self.target_name])
+
+        if self.save_params and self._get_acquisition_index(batch_index) >= 0:
+            self.params_hist.append(self.target_model.param_array)
 
         optimize = self._should_optimize()
         self.target_model.update(params, batch[self.target_name], optimize)
@@ -395,6 +404,43 @@ class BayesianOptimization(ParameterInference):
         """
         return vis.plot_gp(self.target_model, self.target_model.parameter_names, axes,
                            resol, const, bounds, true_params, **kwargs)
+
+
+    def plot_params_hist(self, axes=None, **kwargs):
+        """Plot target model hyperparameters history.
+
+        Parameters
+        ----------
+        axes : plt.Axes or arraylike of plt.Axes
+
+        Return
+        ------
+        axes : np.array of plt.Axes
+
+        """
+        if len(self.params_hist) == 0:
+            return
+        return vis.plot_ordered(np.array(self.params_hist),
+                                self.target_model.param_names,
+                                axes=axes,
+                                **kwargs)
+
+    def plot_evidence_hist(self, axes=None, **kwargs):
+        """Plot evidence index vs. acquired parameters and resulting discrepancy.
+
+        Parameters
+        ----------
+        axes : plt.Axes or arraylike of plt.Axes
+
+        Return
+        ------
+        axes : np.array of plt.Axes
+
+        """
+        return vis.plot_evidence_hist(self.target_model,
+                                      init=self.n_initial_evidence,
+                                      axes=axes,
+                                      **kwargs)
 
 
 class BOLFI(BayesianOptimization):
