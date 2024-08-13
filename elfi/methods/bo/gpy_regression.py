@@ -322,6 +322,30 @@ class GPyRegression:
         except np.linalg.linalg.LinAlgError:
             logger.warning("Numerical error in GP optimization. Stopping optimization")
 
+    def loo_predictive(self, noiseless=False):
+        """Calculate leave-one-out predictive means and variances.
+
+        Parameters
+        ----------
+        noiseless : bool
+            whether to include the noise variance or not to the returned variance
+
+        Returns
+        -------
+        tuple
+            (mean, var) where
+                mean : np.array
+                    with shape (self.n_evidence, 1)
+                var : np.array
+                    with shape (self.n_evidence, 1)
+
+        """
+        g = self._gp.posterior.woodbury_vector
+        c = np.diag(self._gp.posterior.woodbury_inv).reshape(-1, 1)
+        mean = self.Y - g / c
+        var = 1 / c - noiseless * self.noise
+        return mean, var
+
     @property
     def n_evidence(self):
         """Return the number of observed samples."""

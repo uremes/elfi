@@ -399,7 +399,7 @@ def plot_ordered(data, labels, plot_type='line', start=None, end=None, axes=None
         Plot start index. Defaults to 1.
     end : int, optional
         Plot end index. Defaults n_points.
-    axes : iterable of plt.Axes, optional
+    axes : plt.Axes or arraylike of plt.Axes, optional
         Each feature is plotted on a separate axis.
     kwargs : dict, optional
         Optional keywords used to control the axes and the plots.
@@ -595,6 +595,63 @@ def plot_gp(gp, parameter_names, axes=None, resol=50,
                 axes[jy, ix].get_xaxis().set_ticklabels([])
             else:
                 axes[jy, ix].set_xlabel(parameter_names[ix])
+
+    return axes
+
+
+def plot_prediction_error(gp,
+                          data=None,
+                          axes=None,
+                          **kwargs):
+    """Plot individual prediction errors.
+
+    Parameters
+    ----------
+    gp : GPyRegression, required
+    data : tuple, optional
+        Validation data (x, y) where
+            x : dict
+                parameter names and corresponding input values as numpy arrays with shape (n, 1)
+            y : np.array
+                output values, shape (n, 1)
+        If None, leave-one-out prediction errors are calculated over model evidence.
+    axes : plt.Axes or arraylike of plt.Axes
+
+    Returns
+    -------
+    axes : np.array of plt.Axes
+
+    """
+    if data is None:
+        x = gp.X
+        y = gp.Y
+        pred, var = gp.loo_predictive(noiseless=False)
+    else:
+        x = np.column_stack([data[0][param] for param in gp.parameter_names])
+        y = data[1].reshape(-1, 1)
+        pred, var = gp.predict(x, noiseless=False)
+    err = (y - pred) / np.sqrt(var)  # standardised prediction errors
+
+    n_plots = gp.input_dim + 1
+    ncols = min(n_plots, 4)
+    ncols = kwargs.pop('ncols', ncols)
+    kwargs['sharey'] = kwargs.get('sharey', True)
+    shape = ((n_plots - 1) // ncols + 1, ncols)
+    axes, kwargs = _create_axes(axes, shape, **kwargs)
+    axes = axes.ravel()
+
+    axes[0].scatter(pred, err, **kwargs)
+    axes[0].set_xlabel('Model prediction')
+    for ii in range(gp.input_dim):
+        axes[ii + 1].scatter(x[:, ii], err, **kwargs)
+        axes[ii + 1].set_xlabel(gp.parameter_names[ii])
+    for ii in range(n_plots):
+        if ii % ncols == 0:
+            axes[ii].set_ylabel('Standardised prediction error')
+        axes[ii].axhspan(-2, 2, zorder=0, alpha=0.1)  # two standard deviations
+        axes[ii].axhline(0, linestyle = '--', color='k', alpha=0.75)
+    for ii in range(n_plots, len(axes)):
+        axes[ii].set_axis_off()
 
     return axes
 
