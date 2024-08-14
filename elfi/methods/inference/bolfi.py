@@ -405,13 +405,44 @@ class BayesianOptimization(ParameterInference):
         return vis.plot_gp(self.target_model, self.target_model.parameter_names, axes,
                            resol, const, bounds, true_params, **kwargs)
 
+    def plot_gp_error(self, data=None, axes=None, **kwargs):
+        """Plot standardised prediction errors against model predictions and inputs.
+
+        The individual standardised errors should look like normally distributed noise about 0.
+
+        References
+        ----------
+        Bastos and O'Hagan (2009) Diagnostics for Gaussian Process Emulators.
+        https://www.jstor.org/stable/40586652
+
+        Parameters
+        ----------
+        data : tuple, optional
+            Validation data (x, y) where
+                x : dict
+                    parameter names and corresponding input values as numpy arrays with shape
+                    (n, 1)
+                y : np.array
+                    output values, shape (n, 1)
+            If None, leave-one-out prediction errors are calculated over model evidence.
+        axes : plt.Axes or arraylike of plt.Axes, optional
+
+        Returns
+        -------
+        axes : np.array of plt.Axes
+
+        """
+        return vis.plot_gp_error(self.target_model,
+                                 data=data,
+                                 axes=axes,
+                                 **kwargs)
 
     def plot_params_hist(self, axes=None, **kwargs):
         """Plot target model hyperparameters history.
 
         Parameters
         ----------
-        axes : plt.Axes or arraylike of plt.Axes
+        axes : plt.Axes or arraylike of plt.Axes, optional
 
         Return
         ------
@@ -425,12 +456,16 @@ class BayesianOptimization(ParameterInference):
                                 axes=axes,
                                 **kwargs)
 
-    def plot_evidence_hist(self, axes=None, **kwargs):
-        """Plot evidence index vs. acquired parameters and resulting discrepancy.
+    def plot_evidence_hist(self, reference_x=None, reference_y=None, axes=None, **kwargs):
+        """Plot evidence index vs. parameter values and discrepancies.
 
         Parameters
         ----------
-        axes : plt.Axes or arraylike of plt.Axes
+        reference_x : dict, optional
+            Dictionary containing reference values for parameters.
+        reference_y : float, optional
+            Reference value for discrepancies.
+        axes : plt.Axes or arraylike of plt.Axes, optional
 
         Return
         ------
@@ -439,6 +474,8 @@ class BayesianOptimization(ParameterInference):
         """
         return vis.plot_evidence_hist(self.target_model,
                                       init=self.n_initial_evidence,
+                                      reference_x=reference_x,
+                                      reference_y=reference_y,
                                       axes=axes,
                                       **kwargs)
 

@@ -432,7 +432,7 @@ def plot_ordered(data, labels, plot_type='line', start=None, end=None, axes=None
     return axes
 
 
-def plot_evidence_hist(gp, axes=None, init=None, true_params=None, **kwargs):
+def plot_evidence_hist(gp, axes=None, init=None, reference_x=None, reference_y=None, **kwargs):
     """Plot evidence index vs. parameter values and discrepancies.
 
     Parameters
@@ -441,8 +441,10 @@ def plot_evidence_hist(gp, axes=None, init=None, true_params=None, **kwargs):
     axes : plt.Axes or arraylike of plt.Axes, optional
     init: int, optional
         Number of initial evidence.
-    true_params : dict, optional
-        Dictionary containing parameter names with corresponding true parameter values.
+    reference_x : dict, optional
+        Dictionary containing reference values for parameters.
+    reference_y : float, optional
+        Reference value for discrepancies.
 
     Returns
     -------
@@ -457,10 +459,13 @@ def plot_evidence_hist(gp, axes=None, init=None, true_params=None, **kwargs):
         for ii in range(gp.input_dim + 1):
             axes[ii].axvspan(0, init, alpha=0.1)
 
-    if true_params is not None:
+    if reference_x is not None:
         for ii in range(gp.input_dim):
-            value = true_params[gp.parameter_names[ii]]
+            value = reference_x[gp.parameter_names[ii]]
             axes[ii + 1].axhline(value, alpha=0.75, color='r')
+
+    if reference_y is not None:
+        axes[0].axhline(reference_y, alpha=0.75, color='r')
 
     return axes
 
@@ -599,11 +604,18 @@ def plot_gp(gp, parameter_names, axes=None, resol=50,
     return axes
 
 
-def plot_prediction_error(gp,
-                          data=None,
-                          axes=None,
-                          **kwargs):
-    """Plot individual prediction errors.
+def plot_gp_error(gp,
+                  data=None,
+                  axes=None,
+                  **kwargs):
+    """Plot standardised prediction errors against model predictions and inputs.
+
+    The individual standardised errors should look like normally distributed noise about 0.
+
+    References
+    ----------
+    Bastos and O'Hagan (2009) Diagnostics for Gaussian Process Emulators.
+    https://www.jstor.org/stable/40586652
 
     Parameters
     ----------
@@ -649,7 +661,7 @@ def plot_prediction_error(gp,
         if ii % ncols == 0:
             axes[ii].set_ylabel('Standardised prediction error')
         axes[ii].axhspan(-2, 2, zorder=0, alpha=0.1)  # two standard deviations
-        axes[ii].axhline(0, linestyle = '--', color='k', alpha=0.75)
+        axes[ii].axhline(0, linestyle='--', color='k', alpha=0.75)
     for ii in range(n_plots, len(axes)):
         axes[ii].set_axis_off()
 
