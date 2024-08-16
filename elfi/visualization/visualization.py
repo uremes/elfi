@@ -635,14 +635,16 @@ def plot_gp_error(gp,
 
     """
     if data is None:
-        x = gp.X
-        y = gp.Y
-        pred, var = gp.loo_predictive(noiseless=False)
+        x = gp.instance.X
+        y = gp.instance.Y
+        pred, var = gp.loo_predictive()
+        err = (y - pred) / np.sqrt(var)
     else:
-        x = np.column_stack([data[0][param] for param in gp.parameter_names])
-        y = data[1].reshape(-1, 1)
-        pred, var = gp.predict(x, noiseless=False)
-    err = (y - pred) / np.sqrt(var)  # standardised prediction errors
+        x, y = data
+        x = np.column_stack([x[param] for param in gp.parameter_names])
+        y = y.reshape(-1, 1)
+        pred, var = gp.predict(x)
+        err = (y - pred) / np.sqrt(var)
 
     n_plots = gp.input_dim + 1
     ncols = min(n_plots, 4)

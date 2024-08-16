@@ -342,7 +342,7 @@ class GPyRegression:
         """
         g = self._gp.posterior.woodbury_vector
         c = np.diag(self._gp.posterior.woodbury_inv).reshape(-1, 1)
-        mean = self.Y - g / c
+        mean = self.instance.Y - g / c
         var = 1 / c - noiseless * self.noise
         return mean, var
 

@@ -221,9 +221,6 @@ class BayesianOptimization(ParameterInference):
         params = batch_to_arr2d(batch, self.target_model.parameter_names)
         self._report_batch(batch_index, params, batch[self.target_name])
 
-        if self.save_params and self._get_acquisition_index(batch_index) >= 0:
-            self.params_hist.append(self.target_model.param_array)
-
         optimize = self._should_optimize()
         self.target_model.update(params, batch[self.target_name], optimize)
         if optimize:
@@ -255,6 +252,8 @@ class BayesianOptimization(ParameterInference):
         if len(acquisition) == 0:
             acquisition = self.acquisition_method.acquire(
                 self.acq_batch_size, t=t)
+            if self.save_params:
+                self.params_hist.append(self.target_model.param_array)
 
         batch = arr2d_to_batch(
             acquisition[:self.batch_size], self.target_model.parameter_names)
@@ -451,7 +450,10 @@ class BayesianOptimization(ParameterInference):
         """
         if len(self.params_hist) == 0:
             return
-        return vis.plot_ordered(np.array(self.params_hist),
+
+        tot = self.n_evidence - self.n_initial_evidence
+        params_hist = np.repeat(self.params_hist, self.acq_batch_size, axis=0)[:tot]
+        return vis.plot_ordered(params_hist,
                                 self.target_model.param_names,
                                 axes=axes,
                                 **kwargs)
