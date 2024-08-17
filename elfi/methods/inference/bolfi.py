@@ -377,7 +377,6 @@ class BayesianOptimization(ParameterInference):
 
         """
         return vis.plot_discrepancy(self.target_model,
-                                    self.target_model.parameter_names,
                                     axes=axes,
                                     **kwargs)
 

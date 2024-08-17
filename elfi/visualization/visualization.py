@@ -470,15 +470,17 @@ def plot_evidence_hist(gp, axes=None, init=None, reference_x=None, reference_y=N
     return axes
 
 
-def plot_discrepancy(gp, parameter_names, axes=None, **kwargs):
+def plot_discrepancy(gp, axes=None, reference_x=None, reference_y=None, **kwargs):
     """Plot acquired parameters vs. resulting discrepancy.
 
     Parameters
     ----------
     axes : plt.Axes or arraylike of plt.Axes
     gp : GPyRegression target model, required
-    parameter_names : dict, required
-        Parameter names from model.parameters dict('parameter_name':(lower, upper), ... )`
+    reference_x : dict, optional
+        Dictionary containing reference values for parameters.
+    reference_y : float, optional
+        Reference value for discrepancies.
 
     Returns
     -------
@@ -498,11 +500,16 @@ def plot_discrepancy(gp, parameter_names, axes=None, **kwargs):
 
     for ii in range(n_plots):
         axes[ii].scatter(gp.X[:, ii], gp.Y[:, 0], **kwargs)
-        axes[ii].set_xlabel(parameter_names[ii])
+        axes[ii].set_xlabel(gp.parameter_names[ii])
         if ii % ncols == 0:
             axes[ii].set_ylabel('Discrepancy')
+        if reference_x is not None:
+            value = reference_x[gp.parameter_names[ii]]
+            axes[ii].axvline(value, alpha=0.75, color='r')
+        if reference_y is not None:
+            axes[ii].axhline(reference_y, alpha=0.75, color='r')
 
-    for idx in range(len(parameter_names), len(axes)):
+    for idx in range(n_plots, len(axes)):
         axes[idx].set_axis_off()
 
     return axes
