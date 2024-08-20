@@ -653,26 +653,37 @@ def plot_gp_error(gp,
         pred, var = gp.predict(x)
         err = (y - pred) / np.sqrt(var)
 
-    n_plots = gp.input_dim + 1
+    # plot setup
+    n_plots = gp.input_dim + 2
     ncols = min(n_plots, 4)
     ncols = kwargs.pop('ncols', ncols)
     kwargs['sharey'] = kwargs.get('sharey', True)
     shape = ((n_plots - 1) // ncols + 1, ncols)
     axes, kwargs = _create_axes(axes, shape, **kwargs)
     axes = axes.ravel()
+    bins = kwargs.pop('bins', 10)
 
+    # plot errors wrt model predictions and inputs
     axes[0].scatter(pred, err, **kwargs)
     axes[0].set_xlabel('Model prediction')
     for ii in range(gp.input_dim):
         axes[ii + 1].scatter(x[:, ii], err, **kwargs)
         axes[ii + 1].set_xlabel(gp.parameter_names[ii])
-    for ii in range(n_plots):
+    for ii in range(n_plots - 1):
         if ii % ncols == 0:
             axes[ii].set_ylabel('Standardised prediction error')
         axes[ii].axhspan(-2, 2, zorder=0, alpha=0.1)  # two standard deviations
         axes[ii].axhline(0, linestyle='--', color='k', alpha=0.75)
-    for ii in range(n_plots, len(axes)):
+    for ii in range(n_plots - 1, len(axes)):
         axes[ii].set_axis_off()
+
+    # plot overall error distribution, do not share y-axis with the other plots
+    fig = axes[0].figure
+    hist_ax = fig.add_subplot(shape[0], shape[1], n_plots)
+    hist_ax.hist(err, bins=bins)
+    hist_ax.set_title('SSE: {:.1f}, Expected: {}'.format(np.sum(err**2), len(err)), size=10)
+    hist_ax.set_yticks([])
+    hist_ax.set_xlabel('Standardised prediction error')
 
     return axes
 
